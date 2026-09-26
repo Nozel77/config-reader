@@ -1,0 +1,35 @@
+# Generated launcher (recreated via start.cmd --shortcut)
+launch.vbs
+*.lnk
+
+# Backups + atomic-write leftovers (server keeps 5 beside each config it edits)
+backups/
+*.backup.*
+*.tmp
+*.bak
+
+# Generated catalog (tools/build-catalog.mjs regenerates it; not used at runtime)
+catalog.json
+
+# Dev screenshots (tools/shot.mjs output; not referenced by README)
+tools/shots/
+
+# Secrets — never commit tokens
+.env
+*.pem
+*.key
+
+# Node (zero deps today; future-proofing)
+node_modules/
+npm-debug.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~

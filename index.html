@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CONFIG READER</title>
+<script>
+  /* Paint the stored theme before CSS loads, so there is no light-flash on a dark choice. */
+  try {
+    var t = localStorage.getItem('theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* Subtle radial gradient behind landing — only visible when on the picker. */
+  .onboard-wrap::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 50% at 50% 30%, var(--accent-soft) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: -1;
+  }
+  body:has(#editor:not([hidden])) .onboard-wrap::before { display: none; }
+</style>
+</head>
+<body>
+<button id="theme" class="theme" type="button" title="Switch to dark mode" aria-label="Switch to dark mode"><svg viewBox="0 0 16 16" aria-hidden="true" class="ic"><path d="M14 9.5A5.5 5.5 0 0 1 6.5 2 5.5 5.5 0 1 0 14 9.5z" fill="currentColor"/></svg></button>
+<div class="onboard-wrap">
+<main class="wrap">
+
+  <!-- Landing. Three steps, one action: pick a tool, check the path the scan
+       found, then Scan. Scan looks for the selected tool's config file
+       server-side and, if it finds it, goes straight to the editor. -->
+  <section id="onboard" class="onboard">
+    <h1 class="brand">CONFIG READER</h1>
+    <p class="lede">Point a tool at your own endpoint. Pick one, then scan for its config.</p>
+    <ol class="steps" aria-hidden="true">
+      <li class="step"><span class="stepnum">1</span> Pick a tool</li>
+      <li class="step"><span class="stepnum">2</span> Check the path</li>
+      <li class="step"><span class="stepnum">3</span> Scan</li>
+    </ol>
+    <div id="toolpick" class="toolpick" role="radiogroup" aria-label="Which tool to configure"></div>
+    <p id="scanpath" class="scanpath" hidden>Editing <code id="scantarget"></code></p>
+    <button id="scanbtn" class="scan" type="button">Scan Claude Code</button>
+    <p id="obnote" class="note" role="status" aria-live="polite"></p>
+  </section>
+
+  <!-- Editor. Everything below is filled in from what the scan returned. -->
+  <section id="editor" hidden>
+    <div class="actionbar">
+      <button id="switch" class="ghost" type="button" title="Back to the tool picker">Scan again</button>
+      <span id="dot" class="dot" title="unsaved changes"></span>
+      <code id="path" class="path"></code>
+      <span class="spacer"></span>
+      <button id="reload" class="ghost" type="button" title="Re-read the file, discarding edits">Reload</button>
+      <button id="save" class="primary" type="button" disabled>Save</button>
+    </div>
+
+    <h2 id="title" class="title"></h2>
+    <div id="banners" class="banners"></div>
+    <div id="tabs" class="tabs" role="tablist"></div>
+
+    <div id="paneenv" role="tabpanel" aria-labelledby="tab_paneenv">
+      <form id="form" class="grid" onsubmit="return false"></form>
+
+      <!-- Claude Code only: env keys this editor has no field for. Shown so an
+           unknown variable is never invisible and never silently lost. -->
+      <section id="others" class="others" hidden>
+        <h3 class="otherhead">
+          Other variables in <code>env</code>
+          <span id="othercount" class="badge">0</span>
+        </h3>
+        <div id="otherlist" class="otherlist"></div>
+        <div class="addrow">
+          <input id="newkey" placeholder="NEW_VARIABLE_NAME" spellcheck="false"
+                 autocomplete="off" aria-label="New variable name">
+          <button id="addvar" class="ghost small" type="button">Add</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="panemodels" role="tabpanel" aria-labelledby="tab_panemodels" hidden>
+      <div class="modelbar">
+        <select id="modeltarget" aria-label="Which variable a picked model is written to"></select>
+        <input id="modelfilter" placeholder="Filter models…" spellcheck="false"
+               autocomplete="off" aria-label="Filter models">
+        <label class="check" title="Show only models with a 1M+ context window"><input type="checkbox" id="only1m"> 1M only</label>
+        <label class="check" title="Show only models that accept image input"><input type="checkbox" id="onlyvision"> Vision only</label>
+        <button id="loadmodels" class="primary" type="button">Load models</button>
+      </div>
+      <p id="modelnote" class="note"></p>
+      <div id="modelempty" class="empty" hidden></div>
+      <div id="modelhead" class="mhead" hidden><span>Model</span><span class="mheadtags">Tags</span><span></span></div>
+      <div id="modellist" class="modellist"></div>
+    </div>
+
+    <!-- "Other variables" section stays at the bottom of the env pane -->
+  </section>
+
+</main>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>
