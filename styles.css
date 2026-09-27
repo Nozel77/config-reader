@@ -1,201 +1,431 @@
-/* CONFIG READER. Every class here is one app.ts or index.html emits —
-   the field cards, the tool picker, the model list. Theme follows OS until
-   the toggle sets data-theme, which localStorage persists. */
+/* CONFIG READER. BEM: block, block__element, block--modifier. */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root, [data-theme="light"] {
-  --bg: #f1f5f9;
+  /* The config's --muted / --sidebar. Its --background (#f8fafc) is 1.05:1 against the
+     white card — a step nobody can see, and inputs paint with this token. */
+  --bg: #f3f4f6;
   --surface: #ffffff;
-  --surface-2: #e9eef5;
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  --text: #0f172a;
-  --text-2: #475569;
-  --text-3: #94a3b8;
+  --surface-2: #e5e7eb;
+  --border: #d1d5db;
+  /* A hover border and a secondary control's edge are the only cue for those states,
+     so this one clears 3:1 on all three light surfaces (tools/check-contrast.mjs). */
+  --border-strong: #7b8794;
+  --text: #1e293b;
+  --text-2: #4b5563;
+  /* The config's muted grey, two steps darker: on its own rail fill the config's
+     #6b7280 is 3.90:1. #5f6875 is the lightest value that clears 4.5:1 on the page,
+     the card, the rail and the selected row. */
+  --text-3: #5f6875;
   --accent: #6366f1;
-  --accent-hover: #4f46e5;
   --accent-soft: #e0e7ff;
-  --ok: #059669;
+  /* --accent is 3.63:1 on --accent-soft, which is where the selected row and the
+     active filter put their text. This is the value that clears 4.5:1 there. */
+  --accent-text: #4f46e5;
+  /* --accent is tuned for rings and borders; filled, it fails with white text. */
+  --accent-btn: #4f46e5;
+  --accent-btn-hover: #4338ca;
+  --accent-btn-text: #ffffff;
   --ok-soft: #dcfce7;
+  /* The only green left, and the value that clears 4.5:1 on the soft fill every green
+     badge sits on. */
+  --ok-text: #047857;
   --warn: #d97706;
   --warn-soft: #fef3c7;
+  /* Same reasoning as --ok-text: --warn is 2.86:1 on --warn-soft, and a banner is
+     small text too. #b45309 clears 4.5:1 there. */
+  --warn-text: #b45309;
   --err: #dc2626;
   --err-soft: #fee2e2;
-  --radius: 12px;
-  --shadow: 0 1px 3px rgb(15 23 42 / 0.08), 0 4px 16px rgb(15 23 42 / 0.04);
+  /* --err clears 4.5:1 on --surface but only 3.6:1 on its own --err-soft, so the
+     sentence that sits on that fill reads its own value. */
+  --err-text: #b91c1c;
+  /* The config's muted grey, one step darker: at #6b7280 it is 4.39:1 on the page. */
+  --placeholder: #667085;
+  /* The scrollbar is a control, so WCAG 1.4.11 applies: 3:1 against what it sits on.
+     Worst case here is the rail (#e5e7eb) and the page (#f3f4f6), not the white card.
+     #64748b is the lightest value that clears 3:1 on all three. */
+  --scroll-thumb: #64748b;
+  --scroll-thumb-hover: #475569;
+  /* The page texture. Faint graph paper plus a soft accent glow. */
+  --grid: rgb(15 23 42 / 0.018);
+  --glow: rgb(99 102 241 / 0.14);
+  /* The config's 0.5rem radius, and one step below it for controls. */
+  --radius: 8px;
+  /* One height for every button, input and select in the app. */
+  --ctl: 2.35rem;
+  --ctl-r: 6px;
+  --icon: 28px;
+  /* The config's shadow step. --shadow-lg stays a deeper lift: it is the dialog and
+     the stuck action bar, not a card. */
+  --shadow: 0 4px 8px -1px rgb(0 0 0 / 0.1), 0 1px 2px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 16px 40px -12px rgb(15 23 42 / 0.18);
   --transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* --ease is the rail's curve; --spring adds a bounce where linear() is known. */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --spring: var(--ease);
+  /* The config's faces, used only when the machine already has them: this app is
+     offline and fetches no fonts. */
+  --font-sans: Inter, ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 [data-theme="dark"] {
-  --bg: #020617;
-  --surface: #0f172a;
-  --surface-2: #1e293b;
-  --border: #1e293b;
-  --border-strong: #334155;
-  --text: #f1f5f9;
-  --text-2: #94a3b8;
-  --text-3: #64748b;
+  /* The config's card (#1e293b) and muted (#152032), on a page one step below both: its
+     own --background (#0f172a) sits too close to the card for three planes to read. */
+  --bg: #0a1120;
+  --surface: #1e293b;
+  --surface-2: #152032;
+  --border: #4b5563;
+  --border-strong: #7b8794;
+  --text: #e2e8f0;
+  --text-2: #9ca3af;
+  --text-3: #8b95a3;
   --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-soft: #312e81;
-  --ok: #34d399;
+  /* The light fill is indigo-50, so this is indigo-950: the config's dark grey for
+     this slot (#374151) leaves the row's own greys at 3.4-4.1:1. */
+  --accent-soft: #1e1b4b;
+  /* --accent is 3.46:1 on that fill; text that sits on it reads this. */
+  --accent-text: #a5b4fc;
+  --accent-btn: #818cf8;
+  --accent-btn-hover: #a5b4fc;
+  /* The config's dark primary-foreground. */
+  --accent-btn-text: #0f172a;
   --ok-soft: #064e3b;
+  --ok-text: #34d399;
   --warn: #fbbf24;
   --warn-soft: #451a03;
+  --warn-text: #fbbf24;
   --err: #f87171;
   --err-soft: #450a0a;
+  --err-text: #f87171;
+  --placeholder: #8b95a3;
+  /* Quietest passing value, not the brightest: a scrollbar should sit close to the
+     surface. Clears 3:1 on all three dark surfaces. */
+  --scroll-thumb: #6b7b90;
+  --scroll-thumb-hover: #8494a8;
+  --grid: rgb(148 163 184 / 0.05);
+  --glow: rgb(129 140 248 / 0.12);
+  /* The config repeats its light shadows here; a 10% black shadow on a dark surface
+     is no elevation cue at all, so these stay heavier. */
   --shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.3);
   --shadow-lg: 0 16px 40px -12px rgb(0 0 0 / 0.7);
+  --font-sans: Inter, ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* No manual choice yet: follow OS. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
-    --bg: #020617;
-    --surface: #0f172a;
-    --surface-2: #1e293b;
-    --border: #1e293b;
-    --border-strong: #334155;
-    --text: #f1f5f9;
-    --text-2: #94a3b8;
-    --text-3: #64748b;
+    --bg: #0a1120;
+    --surface: #1e293b;
+    --surface-2: #152032;
+    --border: #4b5563;
+    --border-strong: #7b8794;
+    --text: #e2e8f0;
+    --text-2: #9ca3af;
+    --text-3: #8b95a3;
     --accent: #818cf8;
-    --accent-hover: #a5b4fc;
-    --accent-soft: #312e81;
-    --ok: #34d399;
+    --accent-soft: #1e1b4b;
+    --accent-text: #a5b4fc;
+    --accent-btn: #818cf8;
+    --accent-btn-hover: #a5b4fc;
+    --accent-btn-text: #0f172a;
     --ok-soft: #064e3b;
+    --ok-text: #34d399;
     --warn: #fbbf24;
     --warn-soft: #451a03;
+    --warn-text: #fbbf24;
     --err: #f87171;
     --err-soft: #450a0a;
+    --err-text: #f87171;
+    --placeholder: #8b95a3;
+    /* Same values as [data-theme="dark"]: a user who never picked a theme and whose OS
+       is dark must not get the light palette. tools/check-contrast.mjs fails the build
+       if these two blocks drift apart. */
+    --scroll-thumb: #6b7b90;
+    --scroll-thumb-hover: #8494a8;
+    --grid: rgb(148 163 184 / 0.05);
+    --glow: rgb(129 140 248 / 0.12);
     --shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.3);
     --shadow-lg: 0 16px 40px -12px rgb(0 0 0 / 0.7);
+    --font-sans: Inter, ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 }
 
-/* The page toggles `hidden` and also sets display on some of these, so the UA
-   rule has to win outright or a flex container stays visible when hidden. */
+/* A bounce curve written as points. Dropped where linear() is not understood. */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root { --spring: linear(0, 0.36 14%, 0.78 31%, 1.03 48%, 1.01 62%, 1); }
+}
+
+/* The page sets display on some of these, so this has to win outright. */
 [hidden] { display: none !important; }
 
-/* Manual theme toggle. Fixed top-right, out of the way on both screens. */
-.theme {
+/* The sticky header covers the top, so a focused field must not land under it. */
+html { scroll-padding-top: 5rem; }
+
+body {
+  font: 14px/1.5 var(--font-sans);
+  color: var(--text);
+  background-color: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* The app is a product surface, not a document, so the OS scrollbar (dark track,
+   chunky arrows) is the loudest thing on a light page.
+   The two engines need different properties, and they must not be mixed: a
+   non-auto `scrollbar-color` makes Chromium IGNORE ::-webkit-scrollbar outright and
+   fall back to its 15px default (measured: 15px vs 10px). So the standard property
+   is scoped to engines without the webkit pseudo, which in practice means Firefox.
+   Two scrollers get this: the rail and the model-picker list. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  /* A 1px transparent border plus background-clip insets the thumb to 8px, so it
+     reads as a rounded pill floating in the gutter rather than a filled bar. */
+  border: 1px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+/* The corner where two scrollbars meet: nothing to draw. */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Faint graph paper on its own fixed layer, masked to a soft oval so it reads as
+   texture rather than a table. Fits the subject: config files are structured data. */
+body::before {
+  content: '';
   position: fixed;
-  top: 1rem;
-  right: 1rem;
-  z-index: 50;
-  width: 2.5rem;
-  height: 2.5rem;
-  display: inline-flex;
-  align-items: center;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(70rem 35rem at 50% -12%, var(--glow), transparent 62%),
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: auto, 2rem 2rem, 2rem 2rem;
+  mask-image: radial-gradient(ellipse 95% 75% at 50% 32%, #000 35%, transparent 100%);
+}
+
+/* Inputs draw their own focus ring; this is for everything that had none. */
+:where(button, a, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+code { font-family: var(--font-mono); }
+
+/* ------------------------------------------------------------------ app */
+
+/* One layout, two states: the rail is the page, or the rail is a sidebar. */
+.app { display: flex; align-items: stretch; min-height: 100vh; min-height: 100dvh; }
+
+.rail {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  /* Bottom padding reserves the space the landing footer sits in. */
+  padding: 3rem 1.5rem 5rem;
+  border-right: 1px solid transparent;
+  /* Width, not transform: the rail's contents reflow at the end of it. */
+  transition: width 280ms var(--ease), background-color 280ms var(--ease),
+    border-color 280ms var(--ease);
+}
+
+/* Closed, the rail is the whole page: one column, centered both ways. */
+.app:not(.app--editor) .rail {
+  display: grid;
+  grid-template-columns: minmax(0, 34rem);
   justify-content: center;
-  font-size: 1.15rem;
-  line-height: 1;
+  align-content: center;
+  align-content: safe center;
+  text-align: center;
+}
+.app--editor .rail { width: 19rem; }
+
+.rail > * { max-width: 34rem; margin-inline: auto; }
+.app--editor .rail > * { max-width: none; margin-inline: 0; }
+
+.rail__head { }
+/* Brand row. The toggle stays attached to the rail in both states. */
+.rail__top { display: flex; align-items: center; gap: 0.6rem; }
+.rail__top .rail__brand { flex: 1; min-width: 0; }
+/* On the landing the header holds the title alone, so it centers on the column's axis. */
+.app:not(.app--editor) .rail__top { justify-content: center; }
+.app:not(.app--editor) .rail__top .rail__brand { flex: 0 1 auto; }
+
+.app--editor .rail {
+  padding: 1.1rem 0.85rem 0.85rem;
+  border-right-color: var(--border);
+  /* A slightly darker panel gives the sidebar its own plane without a third colour. */
+  background: var(--surface-2);
+  /* Sidebar, not page content: it must not scroll away with the fields. A column, so
+     the footer can sit at its foot instead of scrolling away with the tool list. */
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Items keep their height: a short window must scroll the rail, not squash the cards. */
+.app--editor .rail > * { flex-shrink: 0; }
+.app--editor .rail .tool-card { background: var(--surface); }
+/* A 19rem column has no room for the intro paragraph, and this is navigation now. */
+.app--editor .rail__lede { display: none; }
+.app--editor .rail__brand {
+  font-size: 0.95rem;
+  letter-spacing: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Only in the editor: there is no editor to go back from on the landing. */
+.app:not(.app--editor) .rail__back { display: none; }
+.app--editor .rail__back { display: inline-flex; }
+/* Icon only in the sidebar: three square buttons with tooltips read better in a 19rem
+   column than a row of labelled pills. The labels are the landing footer's. */
+.app--editor .rail__action-label { display: none; }
+.app--editor .rail__action {
+  width: var(--ctl);
+  height: var(--ctl);
+  padding: 0;
+  justify-content: center;
   color: var(--text-2);
   background: var(--surface);
   border: 1.5px solid var(--border);
-  border-radius: 50%;
-  box-shadow: var(--shadow);
-  cursor: pointer;
-  transition: color var(--transition), border-color var(--transition), transform var(--transition);
+  border-radius: var(--ctl-r);
 }
-.theme:hover {
+.app--editor .rail__action:hover {
   color: var(--text);
+  background: var(--surface-2);
   border-color: var(--border-strong);
-  transform: scale(1.05);
 }
 
-body {
-  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color: var(--text);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
-  min-height: 100vh;
+/* Utility actions: back (editor only), theme, the repo (landing only), and the switch
+   for the console window. One row, so the sidebar can carry it at the top. */
+.rail__foot {
+  position: absolute;
+  bottom: 1.75rem;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
 }
+/* In the sidebar the controls sit under the title, left-aligned, not pinned to the
+   foot of a tall column. The rail is a column, so order puts them there. */
+.app--editor .rail__foot {
+  order: 1;
+  position: static;
+  margin-top: 0;
+  padding-top: 0.75rem;
+  justify-content: flex-start;
+  gap: 0.4rem;
+}
+.app--editor .rail__head { order: 0; }
+/* The sidebar header is a left-aligned row, so the controls under it line up with it. */
+.app--editor .rail__top { justify-content: flex-start; text-align: left; }
+.app--editor .rail__top .rail__brand { flex: 1 1 auto; }
+.app--editor .tool-picker { order: 2; }
+.app--editor .rail__note { order: 3; }
+/* The repo link belongs to the landing's footer, not the sidebar's control row. */
+.app--editor .rail__action--repo { display: none; }
 
-code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace; }
+/* One shape for all of them. */
+.rail__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--text-3);
+  background: none;
+  border: 0;
+  text-decoration: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+.rail__action:hover { color: var(--text); background: var(--surface); }
+.rail__action .icon { width: 1rem; height: 1rem; }
 
-.wrap { max-width: 76rem; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
-
-/* Animations */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes slideIn {
-  from { opacity: 0; transform: scale(0.98); }
-  to { opacity: 1; transform: scale(1); }
-}
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.animate-in {
-  animation: fadeIn 300ms var(--transition) both;
-}
+.main { flex: 1 1 0; min-width: 0; --pad: 2rem; padding: 0 var(--pad) 6rem; }
+.app:not(.app--editor) .main { display: none; }
+/* Opacity and a short rise, never a sideways slide: .main is viewport-wide. */
+.app--editor .main { animation: editorIn 240ms var(--ease) backwards; }
 
 /* ------------------------------------------------------------- landing */
 
-.onboard {
-  max-width: 48rem;
-  margin: 8vh auto 0;
-  text-align: center;
-  animation: fadeIn 400ms var(--transition) both;
-}
-
-.brand {
-  font-size: 2rem;
+.rail__brand {
+  font-size: 1.5rem;
   font-weight: 700;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  /* The heading carries sentence case; the design is caps. */
+  text-transform: uppercase;
 }
 
-.lede {
-  margin-top: 0.5rem;
+.rail__lede {
+  margin-top: 0.35rem;
   color: var(--text-2);
-  font-size: 1.05rem;
+  font-size: 0.9rem;
 }
 
-/* Wizard steps: a static 1-2-3 above the picker. Pure signpost, no state. */
-.steps {
-  display: flex;
-  gap: 1.5rem;
-  justify-content: center;
-  list-style: none;
-  margin: 1.75rem 0 0;
-  padding: 0;
-  color: var(--text-2);
-  font-size: 0.85rem;
-}
-.step { display: flex; align-items: center; gap: 0.5rem; }
-.stepnum {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 50%;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--text-2);
-}
+/* The landing arrives in one gesture. --i is the card's index, set where it is drawn.
+   backwards, not both: a finished animation keeps applying its last keyframe, and an
+   applied animation outranks normal declarations, so `both` would freeze the cards. */
+.app:not(.app--editor) .rail__brand { animation: rise 460ms var(--ease) backwards; }
+.app:not(.app--editor) .rail__lede { animation: rise 460ms var(--ease) 70ms backwards; }
 
-.toolpick {
+/* The theme glyph is redrawn on every toggle, so the new one animates in. */
+.rail__action--theme .icon { animation: pop 320ms var(--spring) backwards; }
+
+/* --------------------------------------------------------- tool picker */
+
+.tool-picker {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-  gap: 1rem;
-  margin: 2.5rem 0 1.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.75rem;
+  margin: 2rem 0 0;
   text-align: left;
 }
+.app:not(.app--editor) .tool-picker .tool-card {
+  animation: rise 480ms var(--ease) backwards;
+  animation-delay: calc(140ms + var(--i, 0) * 55ms);
+}
+/* Open: one card per row in the rail, and the grid stops being a hero. */
+.app--editor .tool-picker { grid-template-columns: 1fr; gap: 0.35rem; margin: 1rem 0 0; }
 
-.tool {
+.tool-card {
   display: flex;
   align-items: center;
-  gap: 0.875rem;
-  padding: 1.1rem 1.25rem;
+  gap: 0.8rem;
+  padding: 0.8rem 0.9rem;
   font: inherit;
   color: inherit;
   text-align: left;
@@ -204,67 +434,95 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   cursor: pointer;
-  transition: border-color var(--transition), box-shadow var(--transition);
   position: relative;
+  transition: border-color var(--transition), box-shadow var(--transition),
+    opacity 240ms ease, translate 260ms var(--spring);
 }
-.tool:hover {
-  border-color: var(--border-strong);
-}
-.tool.on {
+.tool-card:hover { border-color: var(--border-strong); }
+/* The landing cards lift; a 19rem sidebar has nowhere to lift into. */
+.app:not(.app--editor) .tool-card:hover { translate: 0 -3px; box-shadow: var(--shadow-lg); }
+.app:not(.app--editor) .tool-card:active { translate: 0 -1px; }
+/* Press feedback for the standalone clickables. The model row's own button is not here:
+   it is a flex column inside the row, so translating it would slide the text out from
+   under the test button. The row answers instead, below. */
+.hint:active, .to-top:active, .rail__action:active { translate: 0 1px; }
+.tool-card--selected {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow);
 }
-.tool img {
+.app--editor .tool-card--selected { box-shadow: 0 0 0 3px var(--accent-soft); }
+/* No chip behind the tiles: they are opaque brand marks with light glyphs. */
+.tool-card__icon {
   flex-shrink: 0;
-  border-radius: 8px;
-  width: 32px;
-  height: 32px;
+  border-radius: 7px;
+  width: var(--icon);
+  height: var(--icon);
   object-fit: contain;
+  transition: scale 260ms var(--spring);
+}
+.app:not(.app--editor) .tool-card:hover .tool-card__icon { scale: 1.06; }
+
+/* The sidebar's card: the landing size is a hero, this is a list row. */
+.app--editor .tool-card {
+  padding: 0.5rem 0.6rem;
+  gap: 0.6rem;
+  border-width: 1px;
+  border-radius: 10px;
+  box-shadow: none;
 }
 
-.toolname { font-weight: 650; font-size: 0.95rem; }
-
-.scan {
-  padding: 0.85rem 2rem;
-  font: inherit;
-  font-weight: 600;
+.tool-card__name {
+  font-weight: 650;
   font-size: 0.95rem;
-  color: #fff;
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius);
-  box-shadow: 0 4px 12px rgb(99 102 241 / 0.35);
-  cursor: pointer;
-  transition: background var(--transition), transform var(--transition), box-shadow var(--transition);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.scan:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-.scan:disabled { opacity: 0.6; cursor: default; }
+.app--editor .tool-card__name { font-size: 0.85rem; }
 
-.scanpath { margin-bottom: 1.25rem; font-size: 0.9rem; color: var(--text-2); }
-.scanpath code { color: var(--text); }
+/* Scanning says so in place, and the rest of the grid steps back. */
+.tool-card--busy { border-color: var(--accent); }
+/* A scan in flight: the card cannot be pressed again, and its badge pulses. */
+.tool-card--busy { pointer-events: none; }
+.tool-card--busy .tool-card__badge { opacity: 0.55; animation: pulse 1.1s ease-in-out infinite; }
+.tool-picker:has(.tool-card--busy) .tool-card:not(.tool-card--busy) { opacity: 0.5; }
+
+/* --------------------------------------------------------------- note */
 
 .note { margin-top: 1rem; font-size: 0.875rem; color: var(--text-2); }
-.note.err { color: var(--err); }
-#obnote:empty, .note:empty { display: none; }
+.note--error { color: var(--err-text); }
+.note:empty { display: none; }
+.app--editor .rail__note { margin-top: 0.75rem; font-size: 0.8rem; }
 
-/* -------------------------------------------------------------- editor */
+/* ------------------------------------------------------------- editor */
 
+/* Sticky, full-bleed and flat: a bar rather than a floating card. It never wraps -
+   the path is what gives way, so Reload and Save stay on the line at every width. */
 .actionbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  margin-bottom: 1.5rem;
+  flex-wrap: nowrap;
+  gap: 0.6rem;
+  margin: 0 calc(-1 * var(--pad)) 1.5rem;
+  padding: 0.6rem var(--pad);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  transition: box-shadow var(--transition), background-color var(--transition);
 }
-.spacer { flex: 1; }
+/* Once content passes under it, the bar lifts off the page. */
+.actionbar--stuck { box-shadow: var(--shadow-lg); }
+@supports (backdrop-filter: blur(1px)) {
+  .actionbar {
+    background: color-mix(in srgb, var(--bg) 84%, transparent);
+    backdrop-filter: blur(14px) saturate(1.4);
+  }
+}
 
-.dot {
+.actionbar__dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -272,21 +530,23 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   flex-shrink: 0;
   transition: background var(--transition);
 }
-.dot.on {
+.actionbar__dot--dirty {
   background: var(--accent);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
-.path {
+/* The path gives way first: it takes what is left and ellipsises. */
+.actionbar__path {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 0.8rem;
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 16rem;
 }
 
-.title {
+.editor__title {
   margin: 0 0 1.25rem;
   font-size: 1.5rem;
   font-weight: 700;
@@ -295,14 +555,9 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   align-items: center;
   gap: 0.75rem;
 }
-.title img {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-}
 
-.banners { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
-.banners:empty { display: none; }
+.editor__banners { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
+.editor__banners:empty { display: none; }
 
 .banner {
   padding: 0.8rem 1rem;
@@ -311,79 +566,199 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   border-radius: var(--radius);
   line-height: 1.5;
 }
-.banner.warn { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
-.banner.err { color: var(--err); background: var(--err-soft); border-color: var(--err); }
+/* --warn and --err are tuned for borders; the sentence on the soft fill reads the
+   -text value, which clears 4.5:1 on it. */
+.banner--warn { color: var(--warn-text); background: var(--warn-soft); border-color: var(--warn); }
+.banner--error { color: var(--err-text); background: var(--err-soft); border-color: var(--err); }
 .banner b { font-weight: 650; }
 
-/* ---------------------------------------------------------------- tabs */
+/* -------------------------------------------------------------- buttons */
 
-.tabs {
+/* One height and one radius for every control, icon-only ones included. */
+.button {
   display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  margin-bottom: 1.5rem;
-  background: var(--surface-2);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.tab {
-  padding: 0.5rem 1.25rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  height: var(--ctl);
+  padding: 0 0.95rem;
   font: inherit;
-  font-size: 0.875rem;
-  color: var(--text-2);
-  background: none;
-  border: none;
-  border-radius: 8px;
+  font-size: 0.85rem;
+  border-radius: var(--ctl-r);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition), box-shadow var(--transition);
-  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--transition), border-color var(--transition), color var(--transition),
+    box-shadow var(--transition), translate 220ms var(--spring);
 }
-.tab:hover { color: var(--text); background: var(--surface); }
-.tab.on {
-  color: var(--text);
+.button--ghost {
+  color: var(--text-2);
   background: var(--surface);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+  border: 1.5px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.button--ghost:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.button:active:not(:disabled) { translate: 0 1px; }
+.button--primary {
+  color: var(--accent-btn-text);
+  background: var(--accent-btn);
+  border: 1.5px solid var(--accent-btn);
   font-weight: 600;
 }
-
-/* -------------------------------------------------------- field cards */
-
-/* One section per group (Connection / Models / Runtime). The heading says the
-   group once; the cards inside no longer repeat it. */
-#form.grid { display: flex; flex-direction: column; gap: 2rem; }
-.fgroup { display: flex; flex-direction: column; gap: 1rem; }
-.fgrouphead {
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-2);
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border);
+.button--primary:hover:not(:disabled) {
+  background: var(--accent-btn-hover);
+  border-color: var(--accent-btn-hover);
 }
+.button:disabled { opacity: 0.45; cursor: default; }
+/* Waiting on the network: a spinner rides in front of the label, and the button reads as
+   working rather than dead — which is why it overrides the faded disabled look. */
+.button--busy { cursor: progress; }
+/* Two classes' worth of specificity: .button:disabled is the rule being overridden, so
+   a bare .button--busy loses to it. */
+.button.button--busy:disabled { opacity: 1; cursor: progress; }
+.button--busy::before {
+  content: '';
+  flex-shrink: 0;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 700ms linear infinite;
+}
+/* An icon-only button is a fixed square with room for exactly one glyph: the spinner
+   replaces the icon rather than stacking beside it. */
+.button--icon.button--busy .icon { display: none; }
+.button--small { padding: 0 0.65rem; font-size: 0.78rem; }
+.button--icon { width: var(--ctl); padding: 0; }
+.button--icon .icon { width: 1rem; height: 1rem; pointer-events: none; }
+/* --err is tuned for the border; the label reads the value that clears 4.5:1 on the
+   card, and on its own soft fill. */
+.button--danger { color: var(--err-text); border-color: var(--err); }
+.button--danger:hover { color: var(--err-text); background: var(--err-soft); border-color: var(--err); }
+/* On the soft fill the plain --accent is 3.63:1, so the active label reads --accent-text. */
+.button--active { color: var(--accent-text); border-color: var(--accent); background: var(--accent-soft); }
 
-.field {
+.icon { display: block; flex-shrink: 0; }
+
+/* ----------------------------------------------------------- field rows */
+
+/* One panel for the whole form, not one card per field: nine bordered boxes read as
+   nine separate things, which they are not. Groups are headings inside the panel. */
+.field-list {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  padding: 1.15rem 1.25rem;
+  padding: 0.35rem 0;
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  transition: border-color var(--transition), box-shadow var(--transition);
-  animation: fadeIn 300ms var(--transition) both;
 }
-.field:hover {
-  border-color: var(--border-strong);
+.field-group { display: flex; flex-direction: column; }
+.field-group + .field-group { border-top: 1px solid var(--border); }
+.field-group__title {
+  padding: 0.7rem 1.15rem 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-3);
 }
 
-.fhead { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
-.flabel { font-weight: 650; font-size: 0.95rem; }
-.fhead .fkey { margin-left: auto; font-size: 0.7rem; color: var(--text-3); }
+/* A row: the name on the left, the control on the right. */
+.field-card {
+  display: grid;
+  grid-template-columns: minmax(0, 11rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.4rem 1rem;
+  padding: 0.5rem 1.15rem;
+  animation: rise 300ms var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 24ms);
+}
+.field-card + .field-card { border-top: 1px solid var(--border); }
 
-.hint { font-size: 0.8rem; color: var(--text-3); line-height: 1.5; }
+.field-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.field-card__label { font-weight: 600; font-size: 0.9rem; }
+
+.field-card__row { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+
+/* The description behind a "?", so a row stays one line. The key rides along: both
+   are read once, not every time the form is scanned. */
+.hint {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  cursor: help;
+  transition: color var(--transition), border-color var(--transition);
+}
+.hint:hover, .hint:focus { color: var(--text); border-color: var(--text-3); }
+.hint::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 0.55rem);
+  left: -0.35rem;
+  width: max-content;
+  max-width: min(20rem, 70vw);
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--bg);
+  background: var(--text);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  /* pre-line: the env key sits on its own line above the sentence. */
+  white-space: pre-line;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--transition), visibility var(--transition);
+  z-index: 6;
+}
+.hint:hover::after, .hint:focus::after { opacity: 1; visibility: visible; }
+.field-card__input {
+  flex: 1;
+  min-width: 0;
+  height: var(--ctl);
+  padding: 0 0.75rem;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+.field-card__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--surface);
+}
+.field-card__input::placeholder { color: var(--placeholder); }
+
+/* --------------------------------------------------------------- badge */
 
 .badge {
   padding: 0.15rem 0.5rem;
@@ -393,102 +768,50 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   color: var(--text-2);
   background: var(--surface-2);
   border: 1px solid var(--border);
-}
-.badge.unset { color: var(--text-3); }
-.badge.found { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
-.badge.cur { color: var(--ok); background: var(--ok-soft); border-color: var(--ok); }
-.badge.see { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
-.badge.novis { color: var(--text-3); }
-
-.inputrow { display: flex; gap: 0.5rem; }
-.inputrow input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.6rem 0.75rem;
-  font: inherit;
-  font-size: 0.875rem;
-  color: var(--text);
-  background: var(--bg);
-  border: 1.5px solid var(--border);
-  border-radius: 8px;
-  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
-}
-.inputrow input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  background: var(--surface);
-}
-.inputrow input::placeholder { color: var(--text-3); }
-
-/* ------------------------------------------------- buttons (ghost etc) */
-
-.ghost, .primary {
-  padding: 0.55rem 1rem;
-  font: inherit;
-  font-size: 0.85rem;
-  border-radius: 8px;
-  cursor: pointer;
+  /* A badge is one short word: without these it wraps mid-word when space is tight. */
   white-space: nowrap;
-  transition: background var(--transition), border-color var(--transition), color var(--transition), box-shadow var(--transition);
+  flex-shrink: 0;
 }
-.ghost {
-  color: var(--text-2);
-  background: var(--surface);
-  border: 1.5px solid var(--border);
-  box-shadow: var(--shadow);
-}
-.ghost:hover {
-  color: var(--text);
-  background: var(--surface-2);
-  border-color: var(--border-strong);
-}
-.primary {
-  color: #fff;
-  background: var(--accent);
-  border: 1.5px solid var(--accent);
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgb(99 102 241 / 0.3);
-}
-.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-.primary:disabled { opacity: 0.45; cursor: default; transform: none; box-shadow: none; }
-.small { padding: 0.4rem 0.7rem; font-size: 0.78rem; }
-.ghost.icon { padding: 0.4rem 0.55rem; display: inline-flex; align-items: center; justify-content: center; }
-.ghost.icon .ic { width: 0.85rem; height: 0.85rem; pointer-events: none; }
-.theme .ic { width: 1.15rem; height: 1.15rem; }
-.ic { display: block; flex-shrink: 0; }
-.ghost.danger { color: var(--err); border-color: var(--err); }
-.ghost.danger:hover { color: var(--err); background: var(--err-soft); border-color: var(--err); }
-.ghost.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* Text badges need 4.5:1, which is why this amber is --warn-text and not --warn: the
+   decorative amber is 2.86:1 on its own --warn-soft. */
+.badge--warn { color: var(--warn-text); background: var(--warn-soft); border-color: var(--warn-text); }
+/* --ok-text: the decorative green it replaced is gone, and this clears the bar on the
+   soft fill a badge actually sits on. */
+.badge--ok { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-text); }
+/* Same reasoning: --ok-text is the only green left and it clears the bar. */
+.badge--installed { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-text); }
+.badge--absent { color: var(--text-2); }
+/* "free" is the fact that decides a pick when a list is 89 models long, so it reads
+   as loudly as the Installed badge. */
+.badge--free { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-text); }
+.tool-card__badge { margin-left: auto; }
 
-/* ---------------------------------------------------- other env vars */
+/* ------------------------------------------------------- other env vars */
 
-.others {
+.other-vars {
   margin-top: 1.5rem;
   padding: 1.15rem 1.25rem;
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  animation: fadeIn 300ms var(--transition) both;
+  animation: rise 300ms var(--ease) backwards;
 }
-.otherhead {
+.other-vars__title {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   font-size: 0.9rem;
   font-weight: 650;
 }
-.otherlist { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem; }
-.otherrow { display: flex; align-items: center; gap: 0.5rem; }
-.otherrow .fkey { flex: 0 0 16rem; font-size: 0.78rem; color: var(--text-2); overflow-wrap: anywhere; }
-.otherrow input {
+.other-vars__list { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem; }
+.other-vars__row { display: flex; align-items: center; gap: 0.5rem; }
+.other-vars__key { flex: 0 0 16rem; font-size: 0.78rem; color: var(--text-2); overflow-wrap: anywhere; }
+.other-vars__input {
   flex: 1;
   min-width: 0;
-  padding: 0.45rem 0.65rem;
+  height: var(--ctl);
+  padding: 0 0.65rem;
   font: inherit;
   font-size: 0.82rem;
   color: var(--text);
@@ -497,72 +820,267 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   border-radius: 8px;
   transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
 }
-.otherrow input:focus {
+.other-vars__input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
   background: var(--surface);
 }
+.other-vars__add { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.other-vars__add .other-vars__input { border-style: dashed; border-color: var(--border-strong); }
 
-.addrow { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
-.addrow input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.5rem 0.65rem;
-  font: inherit;
-  font-size: 0.82rem;
+/* --------------------------------------------------------- model picker */
+
+/* A native <dialog>: top layer, focus trap, Escape and backdrop come from the browser.
+   display/overlay are discrete, so allow-discrete defers them to the transition's end. */
+.model-picker {
+  width: min(52rem, 92vw);
+  max-width: none;
+  max-height: min(86dvh, 48rem);
+  margin: auto;
+  padding: 1rem 1.1rem 1.1rem;
   color: var(--text);
-  background: var(--bg);
-  border: 1.5px dashed var(--border-strong);
-  border-radius: 8px;
-  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
-}
-.addrow input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
   background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  /* The closed state, so the close transition has somewhere to come from. */
+  opacity: 0;
+  scale: 0.97;
+  translate: 0 0.6rem;
+  transition: opacity 180ms ease, scale 240ms var(--spring), translate 240ms var(--spring),
+    display 240ms allow-discrete, overlay 240ms allow-discrete;
 }
+.model-picker[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+}
+@starting-style { .model-picker[open] { opacity: 0; scale: 0.97; translate: 0 0.6rem; } }
+.model-picker::backdrop {
+  background: rgb(15 23 42 / 0);
+  transition: background-color 240ms ease, display 240ms allow-discrete, overlay 240ms allow-discrete;
+}
+.model-picker[open]::backdrop { background: rgb(15 23 42 / 0.55); }
+@starting-style { .model-picker[open]::backdrop { background: rgb(15 23 42 / 0); } }
 
-/* -------------------------------------------------------------- models */
+/* The page behind is inert, but a wheel over the backdrop still scrolls it. */
+body:has(.model-picker[open]) { overflow: hidden; }
 
-.modelbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
-.modelbar select, .modelbar input {
-  padding: 0.55rem 0.75rem;
+.model-picker__head { display: flex; align-items: flex-start; gap: 0.75rem; }
+.model-picker__title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
+.model-picker__sub { margin-top: 0.15rem; font-size: 0.8rem; color: var(--text-3); }
+.model-picker__head .button { margin-left: auto; }
+
+.model-picker__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.model-picker__filter {
+  flex: 1 1 12rem;
+  min-width: 0;
+  height: var(--ctl);
+  padding: 0 0.75rem;
   font: inherit;
   font-size: 0.85rem;
   color: var(--text);
-  background: var(--surface);
+  background: var(--bg);
   border: 1.5px solid var(--border);
   border-radius: 8px;
-  box-shadow: var(--shadow);
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
 }
-.modelbar select { cursor: pointer; }
-.modelbar input[type="text"], .modelbar input:not([type]) { flex: 1; min-width: 12rem; background: var(--bg); }
-.modelbar .check {
+.model-picker__filter:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.model-picker__count { margin-left: auto; }
+.model-picker__count:empty { display: none; }
+
+.check {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.55rem 0.75rem;
-  font-size: 0.85rem;
+  height: var(--ctl);
+  padding: 0 0.7rem;
+  font-size: 0.82rem;
   color: var(--text-2);
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: 8px;
-  box-shadow: var(--shadow);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
-.modelbar .check input { accent-color: var(--accent); cursor: pointer; }
-.modelbar select:focus, .modelbar input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+.check__box { accent-color: var(--accent); cursor: pointer; }
+
+/* The list scrolls inside the dialog; the floor stops the dialog resizing as you type. */
+.model-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: min(48dvh, 22rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Room at the end, so the last row is never clipped flush against the edge. */
+  padding: 0 0.15rem 0.5rem 0;
 }
 
-.empty {
+/* A long list reads as a few short ones: one group per provider the endpoint named. */
+.provider-group { display: flex; flex-direction: column; gap: 0.4rem; }
+.provider-group__name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.provider-group__count {
+  padding: 0 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 650;
+  /* --text-2, not --text-3: this sits on --surface-2 (the rail), where the muted grey
+     is 3.90:1. */
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 999px;
+}
+.provider-group__rows {
+  display: grid;
+  /* min(21rem, 100%) so the track never demands more room than the dialog has -
+     a plain 21rem floor overflowed the picker on a narrow screen. */
+  grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr));
+  gap: 0.4rem;
+}
+
+/* A row is two lines so the id gets the width it needs: id and its badges on top,
+   capability glyphs and the reported numbers underneath, test action on the right. */
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  /* Grid items default to min-width: auto, which lets a long model id push the
+     track wider than the dialog. This keeps the row inside whatever it is given. */
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  transition: border-color var(--transition), background var(--transition);
+}
+.model-row:hover { border-color: var(--border-strong); }
+/* Pressing the row's "use" area tints the whole row, so the click lands somewhere
+   visible. :has() outranks .model-row--current, which is the point: the press is the
+   newer information. */
+.model-row:has(.model-row__use:active) { background: var(--surface-2); }
+.model-row--current { border-color: var(--accent); background: var(--accent-soft); }
+.model-row__use {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.model-row__top { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+/* The id gives up width first: a badge that wraps mid-word is worse than an
+   ellipsis, and the tooltip still carries the whole id. */
+.model-row__id { flex-shrink: 1; }
+.model-row__id {
+  min-width: 0;
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-row__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--text-3);
+}
+.model-row__spec {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* One small glyph per capability the endpoint reported as true. Anything it names
+   that has no glyph here still shows, with a dot; the key name is the tooltip. */
+.model-row__caps { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
+.cap { display: inline-flex; align-items: center; }
+.cap .icon { width: 0.95rem; height: 0.95rem; }
+.model-row:hover .cap { color: var(--text-2); }
+
+/* Test states, read at a glance down the list. An icon button, so the row it sits on
+   stays two lines at any width. */
+.model-row__test {
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: inline-grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+.model-row__test .icon { width: 1rem; height: 1rem; pointer-events: none; }
+/* While a probe is in flight the icon spins, so the wait is visible on the row. */
+.test--busy .icon { animation: spin 700ms linear infinite; }
+.model-row__test:hover { color: var(--text); border-color: var(--border-strong); }
+.model-row__test--busy { color: var(--text-3); cursor: default; }
+.model-row__test--ok { color: var(--ok-text); border-color: var(--ok-text); background: var(--ok-soft); }
+.model-row__test--fail { color: var(--err-text); border-color: var(--err); background: var(--err-soft); }
+
+/* The form's own test button: same probe as the picker's, on the row itself, so a
+   model can be checked without opening the dialog. Only the colour carries the
+   result - the icon stays where it was. The :hover pairs outrank .button--ghost:hover,
+   which would otherwise wash the colour out on hover. */
+.field-card__test--busy { color: var(--text-3); cursor: default; }
+.field-card__test--ok,
+.field-card__test--ok:hover { color: var(--ok-text); border-color: var(--ok-text); background: var(--ok-soft); }
+.field-card__test--fail,
+.field-card__test--fail:hover { color: var(--err-text); border-color: var(--err); background: var(--err-soft); }
+.model-row--tested { border-color: var(--accent); }
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 2.5rem 0;
+  font-size: 0.85rem;
+  color: var(--text-3);
+}
+@keyframes spin { to { rotate: 360deg; } }
+.loading__spinner {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 700ms linear infinite;
+}
+
+.empty-state {
   padding: 3rem 1.5rem;
   text-align: center;
   color: var(--text-3);
@@ -570,7 +1088,7 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   border: 2px dashed var(--border);
   border-radius: var(--radius);
 }
-.empty b {
+.empty-state__title {
   display: block;
   margin-bottom: 0.5rem;
   color: var(--text-2);
@@ -578,42 +1096,41 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   font-weight: 600;
 }
 
-.modellist {
+/* ---------------------------------------------------------- scroll to top */
+
+/* Fixed, not in the sticky bar: that bar is about the file, this is about the page. */
+.to-top {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  z-index: 60;
+  width: 2.75rem;
+  height: 2.75rem;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  background: none;
-  border: none;
-  overflow: visible;
-}
-
-/* Card grid needs no table header. renderModels still toggles it; keep hidden. */
-.mhead { display: none !important; }
-.mheadtags { min-width: 6rem; text-align: right; }
-
-.mrow {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.5rem;
-  padding: 0.85rem 1rem;
+  place-items: center;
+  color: var(--text-2);
   background: var(--surface);
   border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  transition: border-color var(--transition), box-shadow var(--transition);
+  border-radius: 50%;
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  opacity: 0;
+  translate: 0 1rem;
+  pointer-events: none;
+  transition: opacity 200ms ease, translate 280ms var(--spring),
+    color var(--transition), border-color var(--transition);
 }
-.mrow:hover { border-color: var(--border-strong); }
-.mrow code { min-width: 0; font-size: 0.82rem; overflow-wrap: anywhere; }
-.mrow .ghost.small { align-self: flex-start; }
-.mtags { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: flex-start; }
-.mtags:empty { display: none; }
+.to-top--shown { opacity: 1; translate: 0 0; pointer-events: auto; }
+.to-top:hover { color: var(--accent); border-color: var(--accent); }
+.to-top .icon { width: 1rem; height: 1rem; }
 
-/* --------------------------------------------------------------- toast */
+/* ----------------------------------------------------------------- toast */
 
 .toast {
   position: fixed;
+  /* popover=manual puts it in the top layer; these undo the UA box it arrives with. */
+  inset: auto;
+  margin: 0;
   left: 50%;
   bottom: 1.5rem;
   max-width: min(42rem, calc(100vw - 2rem));
@@ -628,21 +1145,147 @@ code, .fkey, .path { font-family: ui-monospace, SFMono-Regular, "Cascadia Mono",
   transform: translate(-50%, 1rem);
   pointer-events: none;
   transition: opacity 200ms ease, transform 200ms ease;
+  /* No z-index can lift a toast over a modal <dialog>: that lives in the top layer, where
+     z-index does not apply. popover=manual is what puts the toast there too, and the
+     script re-promotes it on every show so it is inserted after the dialog. This value is
+     only the fallback path for a browser without the popover API. */
   z-index: 100;
 }
-.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.toast--shown { opacity: 1; transform: translate(-50%, 0); }
+/* display: none until shown, so the fade needs a starting point of its own. */
+@starting-style {
+  .toast--shown { opacity: 0; transform: translate(-50%, 1rem); }
+}
+
+/* ------------------------------------------------------------ animations */
+
+@keyframes rise {
+  from { opacity: 0; translate: 0 12px; }
+  to { opacity: 1; translate: 0 0; }
+}
+@keyframes editorIn {
+  from { opacity: 0; translate: 0 6px; }
+  to { opacity: 1; translate: 0 0; }
+}
+@keyframes pop {
+  from { opacity: 0; rotate: -120deg; scale: 0.5; }
+  to { opacity: 1; rotate: 0deg; scale: 1; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
 
 /* ---------------------------------------------------------- responsive */
 
+@media (max-width: 900px) {
+  /* The split stops being readable, so the editor takes the screen and the rail becomes
+     a bar above it: title and controls share the first line, cards take the next. */
+  .app { flex-direction: column; }
+  .app--editor .rail {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0.7rem 1rem 0.85rem;
+    /* The strip scrolls with the page rather than owning the viewport height. */
+    position: static;
+    height: auto;
+    overflow: visible;
+    overscroll-behavior: auto;
+    /* Wrapping row, so the controls ride the title's line instead of taking one. */
+    flex-flow: row wrap;
+    align-items: center;
+    column-gap: 0.75rem;
+    row-gap: 0.25rem;
+  }
+  .app--editor .rail__head { order: 0; flex: 1 1 auto; min-width: 0; }
+  /* The head grows, so the controls land at the far end of its line. */
+  .app--editor .rail__foot { order: 1; flex: 0 0 auto; padding-top: 0; }
+  .app--editor .rail__lede { display: none; }
+  .app--editor .rail__brand { font-size: 1.25rem; }
+  /* The whole row of cards fits at this width: a scrolling rail is for phones. */
+  .app--editor .tool-picker {
+    order: 2;
+    flex: 1 0 100%;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+  }
+  .app--editor .tool-picker .tool-card { padding: 0.5rem 0.55rem; }
+  .app--editor .rail__note { order: 3; flex: 1 0 100%; }
+  .app--editor .main { --pad: 1rem; }
+  /* Above the scroll-to-top button rather than under it. */
+  .toast { bottom: 5.25rem; }
+}
+
 @media (max-width: 640px) {
-  .wrap { padding: 1.5rem 1rem 5rem; }
-  .onboard { margin-top: 4vh; }
-  .toolpick { grid-template-columns: 1fr; }
-  .grid { grid-template-columns: 1fr; }
-  .otherrow { flex-wrap: wrap; }
-  .otherrow .fkey { flex-basis: 100%; }
-  .actionbar { flex-wrap: wrap; }
-  .path { order: 10; flex-basis: 100%; }
-  .modelbar > * { flex: 1 1 100%; }
-  .modellist { grid-template-columns: 1fr; }
+  .rail { padding: 2.5rem 1rem 4.5rem; }
+  .app--editor .rail { padding: 0.75rem 0.85rem 0.5rem; }
+  .tool-picker { grid-template-columns: 1fr; }
+  /* A phone has no room for two columns: the name sits above its control. */
+  .field-card { grid-template-columns: 1fr; gap: 0.35rem; padding: 0.55rem 0.85rem; }
+  .field-group__title { padding-inline: 0.85rem; }
+  .other-vars__row { flex-wrap: wrap; }
+  .other-vars__key { flex-basis: 100%; }
+  /* The bar keeps one line: the path ellipsises rather than pushing the buttons down. */
+  .actionbar { gap: 0.45rem; }
+  /* On a phone the four footer labels would wrap the landing footer, so it is icons. */
+  .app:not(.app--editor) .rail__action-label { display: none; }
+  .provider-group__rows { grid-template-columns: 1fr; }
+  /* The picker becomes the screen: a long list wants the whole window. */
+  .model-picker {
+    inset: 0;
+    /* Not `width: auto`: with inset 0 the used width came out as the content's
+       min-content width (476px on a 390px screen), so the dialog hung off the
+       right edge. Bound it to the viewport instead. */
+    width: 100vw;
+    max-width: 100vw;
+    height: auto;
+    max-height: none;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+  }
+  .model-picker__filter { flex-basis: 100%; }
+  /* The note carries a URL, which is one unbreakable word: let it break rather than
+     widen the dialog. */
+  .model-picker__note { overflow-wrap: anywhere; }
+  .model-picker__bar, .model-picker__list { min-width: 0; }
+  /* A tooltip is absolutely positioned, but it still counts as scrollable overflow:
+     anchored to the right of a card it made the whole page scroll sideways on a
+     phone. Grow it leftward from the button and cap it to the viewport. */
+  .hint::after { left: auto; right: -0.35rem; max-width: calc(100vw - 3rem); }
+}
+
+@media (max-width: 560px) {
+  /* Four cards no longer fit a line, so the row scrolls sideways: no scrollbar, and
+     the next card peeking says there is more. The padding is the focus ring's. */
+  .app--editor .tool-picker {
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    grid-template-columns: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    padding-block: 4px;
+  }
+  .app--editor .tool-picker::-webkit-scrollbar { display: none; }
+  .app--editor .tool-picker .tool-card {
+    scroll-snap-align: start;
+    padding: 0.5rem 0.7rem;
+  }
+}
+
+/* All of it is decoration on a state change that already happened. */
+@media (prefers-reduced-motion: reduce) {
+  .rail, .actionbar, .tool-card, .tool-card__icon, .button, .field-card, .to-top,
+  .model-row, .model-picker, .rail__action, .model-row__test, .hint, .hint::after {
+    transition: none;
+  }
+  .app--editor .main, .field-card, .other-vars, .tool-card, .rail__brand, .rail__lede,
+  .rail__action--theme .icon {
+    animation: none;
+  }
+  .actionbar__dot--dirty, .tool-card--busy .tool-card__badge, .loading__spinner,
+  .button--busy::before, .test--busy .icon { animation: none; }
 }

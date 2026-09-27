@@ -1,35 +1,50 @@
-// CONFIG READER — env editor.
-//
-// Two screens. The landing screen has one orange Scan button: it looks for
-// ~/.claude/settings.json on this machine and goes straight to the form. The form
-// edits exactly one part of that file — the `env` object. Every other top-level key
-// (permissions, hooks, model, …) is carried through untouched, because the whole
-// parsed document is what gets POSTed back on save.
-//
-// server.js serves this file as /app.js using node's built-in TypeScript type
-// stripping, so there is no build step and no npm dependency.
+// CONFIG READER — env editor. The landing picks a tool; the form edits that file's
+// `env` object and posts the whole document back. Served as /app.js by type stripping.
 
 interface Field {
   key: string;
   label: string;
   hint: string;
   kind: 'text' | 'number' | 'secret';
-  group: 'connection' | 'models' | 'runtime';
+  group: 'connection' | 'models' | 'runtime' | 'roles';
   placeholder?: string;
 }
 
 interface ModelsResponse {
   url?: string;
   models?: string[] | null;
-  windows?: Record<string, number>;
-  vision?: Record<string, boolean>;
+  caps?: Record<string, ModelCaps>;
   error?: string;
+}
+
+// What one endpoint said about one model. `caps` is passed through from the endpoint,
+// so its keys are that gateway's vocabulary and not a list this page keeps. `meta` is
+// what this page derived for the display: a human name, free, sunset, and the two
+// list-valued facts that go in the tooltip.
+interface ModelMeta {
+  name?: string;
+  description?: string;
+  free?: boolean;
+  sunset?: string;
+  efforts?: string[];
+  endpoints?: string[];
+}
+
+interface ModelCaps {
+  provider?: string;
+  ctx?: number;
+  maxOut?: number;
+  caps?: Record<string, unknown>;
+  meta?: ModelMeta;
 }
 
 interface Tool {
   id: string;
   name: string;
   mode: 'env' | 'simple';
+  bin?: string;                             // the CLI name, for the installed badge's tooltip
+  // Whether the CLI is on PATH. Undefined on the local fallback, which is a guess.
+  installed?: boolean;
 }
 
 interface ScanResponse {
@@ -56,23 +71,18 @@ interface SettingsResponse {
   values?: SimpleValues;
 }
 
-// The three values every non-Claude tool needs, and the only ones this editor
-// writes for them. The server patches these into that tool's own config format.
-interface SimpleValues {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-}
+// The values every non-Claude tool is edited through. The server patches them into
+// that tool's own config format; which keys exist depends on the tool (see SIMPLE_FIELDS).
+type SimpleValues = Record<string, string>;
 
-// Grouped by what the variable is for, in the order someone sets them up: where
-// requests go, which model answers them, then the knobs that rarely move. Each
-// group renders as one section with a single heading.
+// Grouped in setup order: where requests go, which model answers, then the knobs.
 const GROUPS: Record<Field['group'], string> = {
   connection: 'Connection',
   models: 'Models',
   runtime: 'Runtime',
+  roles: 'Model roles (optional)',
 };
-const GROUP_ORDER: Field['group'][] = ['connection', 'models', 'runtime'];
+const GROUP_ORDER: Field['group'][] = ['connection', 'models', 'runtime', 'roles'];
 
 const FIELDS: Field[] = [
   { key: 'ANTHROPIC_BASE_URL', label: 'Base URL', kind: 'text', group: 'connection',
@@ -87,97 +97,192 @@ const FIELDS: Field[] = [
   { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet model', kind: 'text', group: 'models',
     hint: 'Answers requests that ask for Sonnet.' },
   { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku model', kind: 'text', group: 'models',
-    hint: 'Handles the small background calls — titles, summaries, quick checks.' },
+    hint: 'Handles the small background calls: titles, summaries, quick checks.' },
   { key: 'ANTHROPIC_DEFAULT_FABLE_MODEL', label: 'Fable model', kind: 'text', group: 'models',
     hint: 'Answers requests that ask for Fable.' },
   { key: 'API_TIMEOUT_MS', label: 'API timeout', kind: 'number', group: 'runtime',
     placeholder: '3000000', hint: 'How long one request may take, in milliseconds. 3000000 is 50 minutes.' },
+  { key: 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', label: 'Auto-compact window', kind: 'number', group: 'runtime',
+    placeholder: '498000',
+    hint: 'The token count that triggers auto-compact. 198000 is a 200K window, 498000 is 500K; empty lets Claude Code derive it from the model.' },
   { key: 'CLAUDE_CODE_AUTO_MODE_SERVER', label: 'Auto mode server', kind: 'text', group: 'runtime',
     placeholder: '0', hint: 'Set to 0 to turn the auto-mode server off.' },
 ];
 
 const KNOWN: Set<string> = new Set(FIELDS.map(f => f.key));
 
-// Tabs are just two panes; the pane id is the whole definition.
-const TABS: { id: string; label: string }[] = [
-  { id: 'paneenv', label: 'Environment' },
-  { id: 'panemodels', label: 'Models' },
-];
-
-// Where a picked model can be written. Each entry is an env key already in FIELDS.
-const MODEL_TARGETS = [
-  { key: 'ANTHROPIC_MODEL', label: 'Model (main)' },
-  { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus' },
-  { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet' },
-  { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku' },
-  { key: 'ANTHROPIC_DEFAULT_FABLE_MODEL', label: 'Fable' },
-];
-
-// Every other tool wants the same three values and nothing more, so they get one
-// shared field set rather than an editor per config format. The keys are the names
-// the server patches into that tool's own file — see TOOLS in server.js.
-const SIMPLE_FIELDS: Field[] = [
+// One field set per tool: the three shared values, plus the model slots that tool has
+// grown — Codex and OpenCode each spawn a subagent, Hermes reads a model per role.
+const CONNECTION_FIELDS: Field[] = [
   { key: 'baseUrl', label: 'Base URL', kind: 'text', group: 'connection',
     placeholder: 'http://localhost:20128',
     hint: 'Where this tool sends its requests. The /v1 suffix is added for you.' },
   { key: 'apiKey', label: 'Auth token', kind: 'secret', group: 'connection',
     hint: 'Bearer token for that endpoint. Stored as plain text in the tool\'s own config.' },
-  { key: 'model', label: 'Model', kind: 'text', group: 'models',
-    hint: 'The model this tool asks for by default.' },
+];
+const SUBAGENT_FIELD: Field = {
+  key: 'subagentModel', label: 'Subagent model', kind: 'text', group: 'models',
+  placeholder: 'provider/model-id',
+  hint: 'The model spawned agents use. Empty leaves the subagent setting as it is.',
+};
+
+// The model slots Hermes reads besides its default: `delegation` is its own top-level
+// block, the rest are keys under `auxiliary:`. The list is 9router's.
+const HERMES_ROLES: { id: string; label: string }[] = [
+  { id: 'delegation', label: 'Delegation (subagents)' },
+  { id: 'vision', label: 'Vision' },
+  { id: 'web_extract', label: 'Web Extract' },
+  { id: 'compression', label: 'Compression' },
+  { id: 'title_generation', label: 'Title Generation' },
+  { id: 'approval', label: 'Approval' },
+  { id: 'skills_hub', label: 'Skills Hub' },
+  { id: 'mcp', label: 'MCP' },
+  { id: 'memory_query_rewrite', label: 'Memory Query Rewrite' },
+  { id: 'background_review', label: 'Background Review' },
+  { id: 'curator', label: 'Curator' },
+  { id: 'monitor', label: 'Monitor' },
 ];
 
-const SIMPLE_TARGETS = [{ key: 'model', label: 'Model' }];
+const SIMPLE_FIELDS: Record<string, Field[]> = {
+  codex: [
+    ...CONNECTION_FIELDS,
+    { key: 'model', label: 'Model', kind: 'text', group: 'models',
+      hint: 'The model this tool asks for by default.' },
+    SUBAGENT_FIELD,
+  ],
+  opencode: [
+    ...CONNECTION_FIELDS,
+    { key: 'model', label: 'Model', kind: 'text', group: 'models',
+      hint: 'The model this tool asks for by default. Every model saved here stays in the provider\'s list.' },
+    SUBAGENT_FIELD,
+  ],
+  hermes: [
+    ...CONNECTION_FIELDS,
+    { key: 'model', label: 'Default model', kind: 'text', group: 'models',
+      hint: 'The model Hermes asks for by default.' },
+    ...HERMES_ROLES.map((r): Field => ({
+      key: r.id, label: r.label, kind: 'text', group: 'roles',
+      placeholder: 'inherit default',
+      hint: 'The model this role uses. Empty leaves the role as it is in the file.',
+    })),
+  ],
+};
 
-// Claude Code reads a trailing [1m] on a model name as "this model has a 1M window".
-// Without it, it assumes 200K and clamps auto-compact accordingly. The suffix has to
-// sit at the very end to match, so an id that already carries a marker is stripped
-// before a new one is decided.
+// Claude Code reads a trailing [1m] as "this model has a 1M window"; without it it
+// assumes 200K. The suffix must be last, so an existing marker is stripped first.
 const CONTEXT_MARKER = /\[1m\]$/i;
 const WINDOW_1M = 1_000_000;
 
 const stripMarker = (id: string): string => id.replace(CONTEXT_MARKER, '').trim();
 
+// Fields that name a model get the picker button, derived rather than listed twice.
+const ALL_FIELDS: Field[] = [...FIELDS, ...Object.values(SIMPLE_FIELDS).flat()];
+const MODEL_KEYS: Set<string> = new Set(
+  ALL_FIELDS.filter(f => f.group === 'models' || f.group === 'roles').map(f => f.key));
+
+const fieldOf = (key: string): Field | undefined => ALL_FIELDS.find(f => f.key === key);
+
+// The field set for one tool: Claude Code owns its whole settings file, the other
+// three are patched into their own formats.
+const fieldsFor = (t: Tool): Field[] => (t.mode === 'simple' ? SIMPLE_FIELDS[t.id] || [] : FIELDS);
+
 // ------------------------------------------------------------------- state
 
-let doc: Record<string, unknown> = {};   // the whole selected file, single source of truth
+let doc: Record<string, unknown> = {};   // the whole selected file
 let filePath = '';
 let baseMtimeMs = 0;
 let home = '';                            // for shortening paths to ~
 let dirty = false;
+// One layout, two states: the picker alone, or the rail plus the editor.
+let opened = false;
 
-// Which tool is being edited. Claude Code is the default, and the only one whose
-// file this editor parses as a document; the rest go through `values`.
+// Claude Code is the default and the only tool whose file is parsed as a document.
 let tool: Tool = { id: 'claude', name: 'Claude Code', mode: 'env' };
 let tools: Tool[] = [tool];
 
-// The simple-mode draft. Held here rather than in the DOM for the same reason the
-// env doc is: a re-render must never be the thing that decides what gets saved.
-let values: SimpleValues = { baseUrl: '', apiKey: '', model: '' };
+// The field that opened the picker: the dialog writes there and nowhere else.
+let targetKey = '';
 
-// The models pane's own state. `loaded` is the full list from the endpoint;
-// `filter` is only what the box narrows it to, so re-rendering never refetches.
+// The simple-mode draft, held outside the DOM so a re-render cannot lose it.
+let values: SimpleValues = {};
+
+// `loaded` is the full list from the endpoint; the rest only narrows it in the view.
 let models: string[] = [];
-let windows: Record<string, number> = {};   // id -> advertised context window, from the endpoint
-let vision: Record<string, boolean> = {};   // id -> image input support, explicit report only — absent means unknown, not text-only
+let caps: Record<string, ModelCaps> = {};   // id -> what the endpoint reported about it
 let loaded = false;
 let filter = '';
 let only1m = false;
 let onlyVision = false;
-let modelError = '';                      // '' | the endpoint's own reason | a fetch failure
-let targetBuilt = false;                  // the target <select> is filled once, then left alone
+let modelError = '';                      // '' | the endpoint's reason | a fetch failure
+let modelsUrl = '';                       // the URL the list came from, for the note
+let loadedFor = '';                       // base URL + token the list was read with
 
-const $ = (id: string): HTMLElement => document.getElementById(id) as HTMLElement;
+// Elements are found by their data-js hook, never by a CSS class, so renaming a
+// class for styling can never break behaviour.
+const $ = (name: string): HTMLElement =>
+  document.querySelector(`[data-js="${name}"]`) as HTMLElement;
 
-// Inline SVG glyphs (currentColor). No icon font, no CDN: this editor runs on
-// localhost and must work offline — a font pulled from the network would leave
-// dead buttons when there is no connection.
+// The two places that write into one card in place look it up by key, not by class.
+const fieldInput = (key: string): HTMLInputElement | null =>
+  document.querySelector(`[data-field="${key}"]`) as HTMLInputElement | null;
+const cardOf = (key: string): HTMLElement | null =>
+  document.querySelector(`[data-card="${key}"]`) as HTMLElement | null;
+
+// Inline SVG glyphs (currentColor): no icon font and no CDN, so this works offline.
 const ICONS: Record<string, string> = {
   eye: '<path d="M1.5 8S3.7 3.8 8 3.8 14.5 8 14.5 8 12.3 12.2 8 12.2 1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/>',
   eyeSlash: '<path d="M1.5 8S3.7 3.8 8 3.8c1.4 0 2.7.5 3.8 1.2M14.5 8S12.3 12.2 8 12.2c-1.4 0-2.7-.5-3.8-1.2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/><path d="M2.5 2.5l11 11" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>',
   trash: '<path d="M6 2h4v1.5h3V5H3V3.5h3V2zm-3.2 4h10.4l-.9 8.2a1 1 0 0 1-1 .8H4.7a1 1 0 0 1-1-.8L2.8 6z" fill="currentColor"/>',
   xmark: '<path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>',
+  arrowUp: '<path d="M8 13V3.6M3.6 8L8 3.6 12.4 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  refresh: '<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13.6 2.4v2.9h-2.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   moon: '<path d="M14 9.5A5.5 5.5 0 0 1 6.5 2 5.5 5.5 0 1 0 14 9.5z" fill="currentColor"/>',
   sun: '<circle cx="8" cy="8" r="3" fill="currentColor"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  power: '<path d="M8 2.5v5.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M11.7 4.4a5 5 0 1 1-7.4 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  // A test is one tiny request: a bolt, not a magnifier.
+  bolt: '<path d="M9.5 1L3 9h3.5L6 15l7-8H9.5z" fill="currentColor"/>',
+  // The model picker opens a list to choose from.
+  list: '<path d="M6 4h7M6 8h7M6 12h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="3" cy="4" r="1" fill="currentColor"/><circle cx="3" cy="8" r="1" fill="currentColor"/><circle cx="3" cy="12" r="1" fill="currentColor"/>',
+  // Capability glyphs. Anything the endpoint reports that has no glyph here still
+  // renders, with a dot and its own key as the label.
+  doc: '<path d="M4 1.5h5l3 3v10H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M9 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
+  wave: '<path d="M2 8h1.5M5 4.5v7M8 2.5v11M11 5.5v5M14 7.5h-1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>',
+  speaker: '<path d="M3 6h2.5L9 3v10L5.5 10H3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11.5 6a3 3 0 0 1 0 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
+  film: '<rect x="2" y="3.5" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 3.5v9M10 3.5v9" stroke="currentColor" stroke-width="1.4"/>',
+  image: '<rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5.8" cy="6.4" r="1.2" fill="currentColor"/><path d="M3 11.5l3.5-3 2.5 2.2L11 8.5l2 2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
+  globe: '<circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.4 8h11.2M8 2.4c1.6 1.7 2.4 3.6 2.4 5.6S9.6 12.9 8 13.6C6.4 12.9 5.6 11 5.6 8s.8-3.9 2.4-5.6z" fill="none" stroke="currentColor" stroke-width="1.4"/>',
+  wrench: '<path d="M10.6 2.4a3.6 3.6 0 0 1-4.4 4.6l-3.2 3.2a1.6 1.6 0 1 0 2.2 2.2l3.2-3.2a3.6 3.6 0 0 1 4.6-4.4L11 6.4l1.4 1.4 1.6-2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
+  brain: '<path d="M6.5 2.5a2.5 2.5 0 0 0-2.5 2.5 2.2 2.2 0 0 0-1 4 2.4 2.4 0 0 0 1.6 3.6 2.4 2.4 0 0 0 4.4-1V4a1.5 1.5 0 0 0-2.5-1.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 4.6a2 2 0 0 1 2.4 1.9 2.2 2.2 0 0 1 .7 4.2 2.2 2.2 0 0 1-3.1 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
+  dot: '<circle cx="8" cy="8" r="2.6" fill="currentColor"/>',
+  // Thinking, as the three facts a gateway reports separately. A toggle switch for
+  // "this can be turned off", level sliders for "the effort is settable".
+  toggle: '<rect x="1.6" y="5" width="12.8" height="6" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5.2" cy="8" r="1.9" fill="currentColor"/>',
+  sliders: '<path d="M2.5 5h11M2.5 11h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="6" cy="5" r="1.7" fill="currentColor"/><circle cx="10.5" cy="11" r="1.7" fill="currentColor"/>',
+};
+
+// Capability keys whose auto-humanized name reads badly. Everything else falls back to
+// humanize(), so a key nobody anticipated still gets a label.
+const CAP_LABELS: Record<string, string> = {
+  thinkingCanDisable: 'Thinking can be turned off',
+  thinkingEffortSupported: 'Reasoning effort is settable',
+};
+
+// Capability key -> glyph. The key list belongs to the endpoint, so this only names
+// the ones worth a picture; everything else falls back to a dot and its own label.
+const CAP_ICONS: Record<string, string> = {
+  vision: 'eye', pdf: 'doc', audioInput: 'wave', audioOutput: 'speaker',
+  videoInput: 'film', imageOutput: 'image', search: 'globe', tools: 'wrench',
+  reasoning: 'brain',
+  // Thinking is reported as three separate facts by some gateways: that it exists
+  // (reasoning), that it can be turned off, and that the effort level is settable.
+  thinkingCanDisable: 'toggle',
+  thinkingEffortSupported: 'sliders',
+};
+
+// "audioInput" -> "Audio input", "pdf" -> "Pdf".
+const humanize = (k: string): string => {
+  const s = k.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
 };
 
 function icon(name: string): HTMLElement {
@@ -186,7 +291,7 @@ function icon(name: string): HTMLElement {
   const s = (typeof doc.createElementNS === 'function' ? doc.createElementNS(NS, 'svg') : document.createElement('svg')) as unknown as HTMLElement;
   s.setAttribute('viewBox', '0 0 16 16');
   s.setAttribute('aria-hidden', 'true');
-  s.setAttribute('class', 'ic');
+  s.setAttribute('class', 'icon');
   (s as unknown as { innerHTML: string }).innerHTML = ICONS[name];
   return s;
 }
@@ -207,14 +312,14 @@ function el(tag: string, props: Record<string, unknown> = {}, ...kids: unknown[]
 // One seam for both modes: the field cards and the model picker read and write
 // through here, so neither has to know which kind of tool it is looking at.
 const env = (): Record<string, string> => {
-  if (tool.mode === 'simple') return values as unknown as Record<string, string>;
+  if (tool.mode === 'simple') return values;
   const e = doc.env;
   return e && typeof e === 'object' && !Array.isArray(e) ? (e as Record<string, string>) : {};
 };
 
 function setEnv(key: string, value: string): void {
   if (tool.mode === 'simple') {
-    (values as unknown as Record<string, string>)[key] = value;
+    values[key] = value;
     markDirty();
     return;
   }
@@ -226,19 +331,25 @@ function setEnv(key: string, value: string): void {
 
 function markDirty(): void {
   dirty = true;
-  $('dot').classList.add('on');
+  $('actionbar-dot').classList.add('actionbar__dot--dirty');
   ($('save') as HTMLButtonElement).disabled = false;
 }
 
-// Windows and macOS compare paths case-insensitively; Linux does not. Folding case
-// on Linux would shorten /home/User/... against a home of /home/user — a different
-// directory — so the comparison follows the platform the server reported.
+// Redraw one field card in place: rebuilding the form would replay every other
+// card's entrance animation for a change that touched one field.
+function refreshCard(key: string): void {
+  const card = cardOf(key);
+  const f = fieldOf(key);
+  if (card && f) card.replaceWith(fieldCard(f));
+}
+
+// Case folding follows the platform: Linux paths are case-sensitive.
 let platform = '';
 const foldCase = (s: string): string =>
   platform === 'win32' || platform === 'darwin' ? s.toLowerCase() : s;
 
-// ~/.claude/settings.json reads better than C:\Users\you\.claude\settings.json, and
-// the exact path stays in the title. Only a leading home dir is shortened.
+// ~/.claude/settings.json reads better than the full path; the exact one stays in
+// the title. Only a leading home dir is shortened.
 function prettyPath(p: string): string {
   if (!home) return p;
   const strip = (s: string) => s.replace(/[\\/]+$/, '');
@@ -251,37 +362,34 @@ function prettyPath(p: string): string {
 
 // -------------------------------------------------------------- landing
 
-// The tool picker. One card per tool, and picking one is what decides which file
-// Scan will look for. Picking is only a selection: it stays on this screen so the
-// choice is visible before anything is read. Scan is what leaves it — and it is
-// also where unsaved changes get their confirm, since only a scan can lose them.
+// One card per tool; picking one scans it and opens the editor. The installed badge
+// is the one thing a user cannot read off the config file, and unknown stays silent.
 function renderTools(): void {
-  $('toolpick').replaceChildren(...tools.map(t => el('button', {
-    class: `tool${t.id === tool.id ? ' on' : ''}`,
+  // --i is the card's index, so the landing's entrance animation can stagger them.
+  $('tool-picker').replaceChildren(...tools.map((t, i) => el('button', {
+    class: `tool-card${t.id === tool.id && opened ? ' tool-card--selected' : ''}`,
     type: 'button',
-    'aria-pressed': String(t.id === tool.id),
-    onclick: () => {
-      if (t.id === tool.id) return;
-      tool = t;
-      // The path is per tool, so the one on screen is now a claim about the wrong
-      // file. Clearing it is cheaper than tracking which tool it belonged to.
-      $('scanpath').hidden = true;
-      $('obnote').textContent = '';
-      $('scanbtn').textContent = `Scan ${tool.name}`;
-      renderTools();
-    },
+    style: `--i:${i}`,
+    'data-tool': t.id,
+    'aria-pressed': String(t.id === tool.id && opened),
+    onclick: () => openTool(t),
   },
-    el('img', { src: `/icon/${t.id}.png`, alt: '', width: '28', height: '28', loading: 'lazy' }),
-    el('span', { class: 'toolname', text: t.name }))));
+    el('img', { class: 'tool-card__icon', src: `/icon/${t.id}.png`, alt: '', width: '28', height: '28', loading: 'lazy' }),
+    el('span', { class: 'tool-card__name', text: t.name }),
+    t.installed === undefined ? null : el('span', {
+      class: `badge tool-card__badge badge--${t.installed ? 'installed' : 'absent'}`,
+      text: t.installed ? 'Installed' : 'Not found',
+      title: t.installed
+        ? `${t.bin} is on your PATH`
+        : `${t.bin} is not on your PATH. Install it before pointing it at an endpoint`,
+    }))));
 }
 
-// The one control on the landing screen. Scanning selects the file server-side, so
-// no path ever travels from the browser — the client only learns what was found.
+// Picking a card is the only way in: it scans that tool and opens the editor.
 async function scan(): Promise<void> {
-  const btn = $('scanbtn') as HTMLButtonElement;
-  btn.disabled = true;
-  btn.textContent = 'Scanning…';
-  $('obnote').textContent = '';
+  const card = $('tool-picker').querySelector(`[data-tool="${tool.id}"]`) as HTMLElement | null;
+  card?.classList.add('tool-card--busy');
+  $('rail-note').textContent = '';
   try {
     const r = await fetch('/api/scan', {
       method: 'POST',
@@ -292,42 +400,78 @@ async function scan(): Promise<void> {
     if (!r.ok) throw new Error((j as unknown as { error: string }).error || `HTTP ${r.status}`);
     home = j.home;
     platform = j.platform;
-    // The registry rides along with every scan, so a picker that was drawn before
-    // the first one is corrected here rather than staying a guess.
-    if (j.tools) { tools = j.tools; renderTools(); }
-    $('scantarget').textContent = prettyPath(j.file);
-    $('scantarget').title = j.file;
-    $('scanpath').hidden = false;
+    // The registry rides along with every scan, so an early picker gets corrected.
+    if (j.tools) { tools = j.tools; }
     await load();
   } catch (e) {
-    $('obnote').textContent = `Scan failed: ${(e as Error).message}`;
+    $('rail-note').textContent = `Scan failed: ${(e as Error).message}`;
   } finally {
-    btn.disabled = false;
-    btn.textContent = `Scan ${tool.name}`;
+    card?.classList.remove('tool-card--busy');
+    renderTools();
   }
 }
 
-function showLanding(): void {
-  $('onboard').hidden = false;
+// Back to the picker: the layout closes, the editor empties, nothing is fetched.
+function closeEditor(): void {
+  opened = false;
+  $('app').classList.remove('app--editor');
   $('editor').hidden = true;
-  $('dot').classList.remove('on');
-  $('obnote').textContent = '';
-  $('scanbtn').textContent = `Scan ${tool.name}`;
-  // The path is per tool and only the scan knows it, so the line stays out of the
-  // way until there is something true to put in it.
-  $('scanpath').hidden = true;
+  $('actionbar-dot').classList.remove('actionbar__dot--dirty');
+  $('rail-note').textContent = '';
+  hideToast();
   renderTools();
+  // The landing is the URL with no tool on it, so a reload or a share does not
+  // reopen a tool the visitor has already left.
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 }
+
+// ---------------------------------------------------------------- routing
+
+// The open tool is the URL: #claude, #codex, … Pushing an entry on open means the
+// browser's own Back closes the editor, Forward reopens it, and a link to a tool
+// lands on that tool.
+const toolFromUrl = (): Tool | null => {
+  const id = location.hash.slice(1);
+  return tools.find(t => t.id === id) || null;
+};
+
+// Picking a tool, from a card, a link, or a Back/Forward step. `keepUrl` is for the
+// history handler: a cancelled confirm has to put the entry back, or the URL would
+// say one tool while the screen shows another.
+function openTool(t: Tool, keepUrl = false): void {
+  if (t.id === tool.id && opened) return;
+  if (dirty && !confirm('Discard unsaved changes and open another tool?')) {
+    if (keepUrl) history.pushState({ tool: tool.id }, '', `#${tool.id}`);
+    return;
+  }
+  dirty = false;
+  tool = t;
+  $('rail-note').textContent = '';
+  void scan();
+}
+
+addEventListener('popstate', () => {
+  const t = toolFromUrl();
+  if (t) { openTool(t, true); return; }
+  if (dirty && !confirm('Discard unsaved changes and go back to the tool list?')) {
+    history.pushState({ tool: tool.id }, '', `#${tool.id}`);
+    return;
+  }
+  dirty = false;
+  closeEditor();
+});
 
 // ---------------------------------------------------------------- editor
 
-function fieldCard(f: Field): HTMLElement {
+// The index is this card's place in its group; the entrance animation reads it.
+function fieldCard(f: Field, i = 0): HTMLElement {
   const cur = env()[f.key];
   const val = cur === undefined || cur === null ? '' : String(cur);
 
   const input = el('input', {
+    class: 'field-card__input',
     type: f.kind === 'secret' ? 'password' : f.kind === 'number' ? 'number' : 'text',
-    id: `f_${f.key}`,   // lets the models pane write into this card without a full re-render
+    'data-field': f.key,   // lets the model picker write into this card in place
     value: val,
     placeholder: f.placeholder || '',
     spellcheck: 'false',
@@ -336,258 +480,475 @@ function fieldCard(f: Field): HTMLElement {
     oninput: (e: Event) => setEnv(f.key, (e.target as HTMLInputElement).value),
   }) as HTMLInputElement;
 
-  const controls: HTMLElement[] = [input];
+  const row = el('div', { class: 'field-card__row' }, input);
+
   if (f.kind === 'secret') {
     const eye = el('button', {
-      class: 'ghost small icon', type: 'button', title: 'reveal the token',
-      'aria-label': 'Show token',
+      class: 'button button--ghost button--icon button--small', type: 'button',
+      title: 'reveal the token', 'aria-label': 'Show token',
       onclick: () => {
         const revealed = input.type === 'password';
         input.type = revealed ? 'text' : 'password';
         eye.replaceChildren(icon(revealed ? 'eyeSlash' : 'eye'));
-        eye.classList.toggle('on', revealed);
+        eye.classList.toggle('button--active', revealed);
         eye.setAttribute('aria-label', revealed ? 'Hide token' : 'Show token');
         eye.setAttribute('title', revealed ? 'hide the token' : 'reveal the token');
       },
     }, icon('eye'));
-    controls.push(eye);
-    controls.push(el('button', {
-      class: 'ghost small icon danger', type: 'button', title: 'remove this variable from env',
-      'aria-label': 'Clear token',
-      onclick: () => { input.value = ''; setEnv(f.key, ''); render(); },
+    row.append(eye);
+  }
+
+  // A row, not a card: the name, then the control. The key and the description are
+  // secondary, so they live behind the "?" rather than in the row.
+  const card = el('div', { class: 'field-card', 'data-group': f.group, 'data-card': f.key, style: `--i:${i}` },
+    el('div', { class: 'field-card__head' },
+      el('span', { class: 'field-card__label', text: f.label }),
+      el('button', {
+        class: 'hint', type: 'button', text: '?',
+        'data-tip': `${f.key}\n${f.hint}`,
+        'aria-label': `${f.label}: ${f.hint}`,
+      })),
+    row);
+
+  if (f.kind === 'secret') {
+    // Redraws this one card, not the form.
+    row.append(el('button', {
+      class: 'button button--ghost button--icon button--small button--danger',
+      type: 'button', title: 'remove this variable from env', 'aria-label': 'Clear token',
+      onclick: () => { input.value = ''; setEnv(f.key, ''); card.replaceWith(fieldCard(f)); },
     }, icon('trash')));
   }
 
-  // data-group stays on the card: check-ui asserts every field carries its
-  // group, and the section heading — not a stripe — is what shows it.
-  return el('div', { class: 'field', 'data-group': f.group },
-    el('div', { class: 'fhead' },
-      el('span', { class: 'flabel', text: f.label }),
-      val === '' ? el('span', { class: 'badge unset', text: 'unset' }) : null,
-      el('code', { class: 'fkey', text: f.key })),
-    el('p', { class: 'hint', text: f.hint }),
-    el('div', { class: 'inputrow' }, ...controls));
+  if (MODEL_KEYS.has(f.key)) {
+    // It reads the endpoint the Base URL and Auth token describe, so it belongs here.
+    row.append(el('button', {
+      class: 'button button--ghost button--icon button--small', type: 'button',
+      title: `Pick a model for ${f.label}`, 'aria-label': `Pick a model for ${f.label}`,
+      onclick: () => openPicker(f.key),
+    }, icon('list')));
+    // The picker is not the only place a model can be checked, and a test belongs on
+    // the row that holds it: no dialog, and it works on a value that is not saved yet.
+    row.append(fieldTestButton(f, input));
+  }
+
+  return card;
 }
 
-// Anything in env that isn't one of the nine fields above. Shown so a variable
-// this UI doesn't know about is never invisible — and never silently lost.
+// Anything in env that isn't one of the nine fields above, so it is never invisible.
 function otherRow(key: string): HTMLElement {
   const val = env()[key];
   const input = el('input', {
+    class: 'other-vars__input',
     type: 'text', value: val === undefined || val === null ? '' : String(val),
     spellcheck: 'false', 'aria-label': key,
     oninput: (e: Event) => setEnv(key, (e.target as HTMLInputElement).value),
   });
-  return el('div', { class: 'otherrow' },
-    el('code', { class: 'fkey', text: key }),
+  const row = el('div', { class: 'other-vars__row', 'data-key': key },
+    el('code', { class: 'other-vars__key', text: key }),
     input,
     el('button', {
-      class: 'ghost small icon danger', type: 'button', title: `delete env.${key}`,
-      'aria-label': `Delete ${key}`,
-      onclick: () => { setEnv(key, ''); render(); },
+      class: 'button button--ghost button--icon button--small button--danger',
+      type: 'button', title: `delete env.${key}`, 'aria-label': `Delete ${key}`,
+      onclick: () => {
+        // One variable goes; re-rendering the form would replay every card's animation.
+        setEnv(key, '');
+        row.remove();
+        const left = $('other-vars-list').children.length;
+        $('other-vars-count').textContent = String(left);
+        if (!left) $('other-vars').hidden = true;
+      },
     }, icon('xmark')));
+  return row;
 }
 
 function render(): void {
-  $('onboard').hidden = true;
+  opened = true;
+  $('app').classList.add('app--editor');
   $('editor').hidden = false;
+  // A reload keeps the entry it is already on; only a fresh open adds one.
+  if (location.hash.slice(1) !== tool.id) history.pushState({ tool: tool.id }, '', `#${tool.id}`);
 
   const simple = tool.mode === 'simple';
-  $('title').textContent = tool.name;
+  $('editor-title').textContent = tool.name;
+  // The editor is opened by picking a card, so the card must show it.
+  renderTools();
 
-  const pathEl = $('path');
+  const pathEl = $('actionbar-path');
   pathEl.textContent = prettyPath(filePath);
   pathEl.title = filePath;
 
-  // Grouped into one section per GROUPS entry with a single heading, so the
-  // group is said once instead of repeated on every card.
-  const list = simple ? SIMPLE_FIELDS : FIELDS;
-  if (simple) {
-    $('form').replaceChildren(...list.map(fieldCard));
-  } else {
-    $('form').replaceChildren(...GROUP_ORDER.map(g =>
-      el('section', { class: 'fgroup', 'data-group': g },
-        el('h3', { class: 'fgrouphead', text: GROUPS[g] }),
-        ...list.filter(f => f.group === g).map(fieldCard))));
-  }
+  // One section per group, so the group is said once instead of on every row. Empty
+  // groups are dropped: a simple tool has no runtime knobs, Claude has no roles.
+  const list = fieldsFor(tool);
+  $('editor-form').replaceChildren(...GROUP_ORDER
+    .filter(g => list.some(f => f.group === g))
+    .map(g => el('section', { class: 'field-group', 'data-group': g },
+      el('h3', { class: 'field-group__title', text: GROUPS[g] }),
+      ...list.filter(f => f.group === g).map(fieldCard))));
 
-  // "Other variables in env" is a Claude Code idea: its settings file is a key/value
-  // bag this editor deliberately does not own. The other three files are not that,
-  // so the section is not offered for them.
-  $('others').hidden = simple;
-  $('others').style.display = simple ? 'none' : '';
+  // "Other variables in env" is a Claude Code idea: a key/value bag this editor
+  // deliberately does not own, so the other tools are not offered it.
+  $('other-vars').hidden = simple;
+  $('other-vars').style.display = simple ? 'none' : '';
   if (simple) {
-    $('otherlist').replaceChildren();
+    $('other-vars-list').replaceChildren();
   } else {
     const others = Object.keys(env()).filter(k => !KNOWN.has(k)).sort();
-    $('others').hidden = others.length === 0;
-    $('othercount').textContent = String(others.length);
-    $('otherlist').replaceChildren(...others.map(otherRow));
+    $('other-vars').hidden = others.length === 0;
+    $('other-vars-count').textContent = String(others.length);
+    $('other-vars-list').replaceChildren(...others.map(otherRow));
   }
   renderModels();
 }
 
 // ------------------------------------------------------------------- models
 
-function renderTabs(): void {
-  $('tabs').replaceChildren(...TABS.map(t => el('button', {
-    id: `tab_${t.id}`, class: 'tab', role: 'tab', text: t.label,
-    'aria-controls': t.id,
-    onclick: () => showTab(t.id),
-  })));
+// A window as a person reads it: 1M, 200K, or the plain number.
+const fmtWindow = (n: number): string =>
+  n >= WINDOW_1M ? `${+(n / WINDOW_1M).toFixed(1)}M` : n >= 10_000 ? `${Math.round(n / 1000)}K` : String(n);
+
+function openPicker(key: string): void {
+  targetKey = key;
+  const f = fieldOf(key);
+  $('model-picker-title').textContent = `Pick a model for ${f ? f.label : key}`;
+  $('model-picker-sub').textContent = `Sets ${key}`;
+  const dlg = $('model-picker') as HTMLDialogElement;
+  if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
+  const box = $('model-picker-filter') as HTMLInputElement;
+  box.focus();
+  box.select?.();
+  renderModels();
+  // Reads the endpoint as it stands on the form, and only when it is not the one the
+  // list already came from.
+  void loadModels(false);
 }
 
-function showTab(pane: string): void {
-  for (const t of TABS) {
-    const on = t.id === pane;
-    $(t.id).hidden = !on;
-    const tab = $(`tab_${t.id}`);
-    tab.classList.toggle('on', on);
-    tab.setAttribute('aria-selected', String(on));
+function closePicker(): void {
+  const dlg = $('model-picker') as HTMLDialogElement;
+  if (typeof dlg.close === 'function') dlg.close(); else dlg.removeAttribute('open');
+}
+
+// A click that lands outside the panel closes it. Anything inside the panel is not a
+// dismissal, and a keyboard or synthetic click carries no coordinates at all — so the
+// target is what decides, and the box only separates the dialog's own padding from the
+// backdrop behind it.
+function onPickerClick(e: MouseEvent): void {
+  const dlg = $('model-picker');
+  if (e.target !== dlg) return;
+  const r = dlg.getBoundingClientRect();
+  const inside = e.clientX >= r.left && e.clientX <= r.right
+    && e.clientY >= r.top && e.clientY <= r.bottom;
+  if (!inside) closePicker();
+}
+
+// The capability icons for one model: one glyph per boolean the endpoint reported as
+// true. Anything it names that has no glyph here still shows, with a dot, and the key
+// name is the tooltip. Strings are not chips — they go in the row's tooltip as text.
+function capChips(id: string): HTMLElement[] {
+  const c = caps[stripMarker(id)]?.caps || {};
+  const out: HTMLElement[] = [];
+  for (const [key, value] of Object.entries(c)) {
+    if (value !== true) continue;
+    const label = CAP_LABELS[key] || humanize(key);
+    out.push(el('span', {
+      class: 'cap', title: label, 'aria-label': label, role: 'img',
+    }, icon(CAP_ICONS[key] || 'dot')));
   }
+  return out;
+}
+
+// What the endpoint reported, in words: the two numbers worth reading at a glance.
+// String-valued capabilities (thinkingFormat and friends) go on the row's tooltip
+// instead — they are real data, but they crowd out the numbers that decide a pick.
+function specLine(id: string): string {
+  const c = caps[stripMarker(id)];
+  if (!c) return 'nothing reported';
+  const bits: string[] = [];
+  bits.push(c.ctx ? `${fmtWindow(c.ctx)} context` : 'context not reported');
+  if (c.maxOut) bits.push(`${fmtWindow(c.maxOut)} out`);
+  if (c.caps && c.caps.vision === false) bits.push('text only');
+  return bits.join(' · ');
+}
+
+// Everything the endpoint said about a model, for the row's tooltip. The tooltip is
+// where the fields that do not earn a chip go: the endpoint's human name, a price,
+// a description, and every string-valued capability under its own key.
+function capTitle(id: string): string {
+  const c = caps[stripMarker(id)];
+  if (!c) return id;
+  const lines = [`${id} · ${providerOf(id)}`, specLine(id)];
+  const m = c.meta || {};
+  if (m.free) lines.push('Free');
+  if (m.sunset) lines.push(`Sunset: ${m.sunset}`);
+  if (m.endpoints?.length) lines.push(`Endpoints: ${m.endpoints.join(', ')}`);
+  if (m.efforts?.length) lines.push(`Reasoning effort: ${m.efforts.join(', ')}`);
+  if (m.name && m.name !== id) lines.push(m.name);
+  if (m.description) lines.push(m.description);
+  for (const [key, value] of Object.entries(c.caps || {})) {
+    if (typeof value === 'string' && value) lines.push(`${humanize(key)}: ${value}`);
+  }
+  return lines.join('\n');
+}
+
+// One model: two lines, so the id gets the width it needs. "Use" is the big click
+// target, "test" is a second action on the same row and cannot live inside it.
+function modelRow(id: string): HTMLElement {
+  const base = stripMarker(id);
+  // Markers stripped: the field may hold "id[1m]" while the row is "id".
+  const here = stripMarker(String(env()[targetKey] ?? '')) === base;
+  const m = caps[base]?.meta || {};
+  return el('div', { class: `model-row${here ? ' model-row--current' : ''}`, 'data-model': id },
+    el('button', {
+      class: 'model-row__use', type: 'button', title: capTitle(id),
+      onclick: () => useModel(id),
+    },
+      el('span', { class: 'model-row__top' },
+        el('code', { class: 'model-row__id', text: id }),
+        m.free ? el('span', { class: 'badge badge--free', text: 'free' }) : null,
+        m.sunset ? el('span', { class: 'badge badge--warn', text: 'sunset' }) : null,
+        here ? el('span', { class: 'badge badge--ok', text: 'in use' }) : null),
+      el('span', { class: 'model-row__meta' },
+        capChips(id).length
+          ? el('span', { class: 'model-row__caps' }, ...capChips(id))
+          : null,
+        el('span', { class: 'model-row__spec', text: specLine(id) }))),
+    testButton(id));
+}
+
+// A one-line completion is the only honest "is it up" test. The endpoint is read from
+// the form, so a probe uses what is on screen rather than what was last saved.
+async function probeModel(id: string): Promise<{ ok: boolean; ms?: number; error?: string }> {
+  const baseUrl = env()[tool.mode === 'simple' ? 'baseUrl' : 'ANTHROPIC_BASE_URL'] || '';
+  const apiKey = env()[tool.mode === 'simple' ? 'apiKey' : 'ANTHROPIC_AUTH_TOKEN'] || '';
+  try {
+    const r = await fetch('/api/test-model', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ baseUrl, apiKey, model: stripMarker(id) }),
+    });
+    const j: { ok?: boolean; ms?: number; error?: string } = await r.json();
+    return { ok: !!j.ok, ms: j.ms, error: j.error };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// A one-line completion is the only honest "is it up" test. The result lives on the
+// row, so a list of them can be read at a glance. Same bolt as the form's own test
+// button: one gesture, wherever it is pressed from.
+function testButton(id: string): HTMLElement {
+  const btn = el('button', {
+    class: 'model-row__test', type: 'button',
+    title: `Send one tiny request to ${id}`,
+    'aria-label': `Test ${id}`,
+  }, icon('bolt')) as HTMLButtonElement;
+  btn.addEventListener('click', () => { void runTest(id, btn); });
+  return btn;
+}
+
+// While a probe is in flight the bolt becomes a spinner, so the row says it is working
+// rather than looking untouched. The class drives the rotation, so it stops with the
+// same switch that ends the wait.
+function setTestBusy(btn: HTMLButtonElement, busy: boolean): void {
+  btn.replaceChildren(icon(busy ? 'refresh' : 'bolt'));
+  btn.classList.toggle('test--busy', busy);
+}
+
+async function runTest(id: string, btn: HTMLButtonElement): Promise<void> {
+  if (btn.classList.contains('model-row__test--busy')) return;
+  btn.classList.add('model-row__test--busy');
+  btn.classList.remove('model-row__test--ok', 'model-row__test--fail');
+  btn.title = `Testing ${id}…`;
+  setTestBusy(btn, true);
+  const { ok, ms, error } = await probeModel(id);
+  setTestBusy(btn, false);
+  btn.classList.add(ok ? 'model-row__test--ok' : 'model-row__test--fail');
+  btn.title = ok ? `${id} answered in ${ms} ms` : `${id}: ${error || 'no answer'}`;
+  toast(ok ? `${id} answered in ${ms} ms` : `${id} did not answer: ${error || 'no answer'}`);
+  btn.classList.remove('model-row__test--busy');
+}
+
+// The same probe, from the form: it reads the field itself, so a model can be checked
+// without opening the dialog, and before it is saved. The icon stays put — only the
+// colour and the tooltip carry the result.
+function fieldTestButton(f: Field, input: HTMLInputElement): HTMLElement {
+  const btn = el('button', {
+    class: 'button button--ghost button--icon button--small field-card__test',
+    type: 'button',
+    title: `Send one tiny request to the model in this field`,
+    'aria-label': `Test ${f.label}`,
+  }, icon('bolt')) as HTMLButtonElement;
+  btn.addEventListener('click', () => { void runFieldTest(input, btn); });
+  return btn;
+}
+
+async function runFieldTest(input: HTMLInputElement, btn: HTMLButtonElement): Promise<void> {
+  const id = input.value.trim();
+  if (!id || btn.classList.contains('field-card__test--busy')) return;
+  btn.classList.add('field-card__test--busy');
+  btn.classList.remove('field-card__test--ok', 'field-card__test--fail');
+  setTestBusy(btn, true);
+  const { ok, ms, error } = await probeModel(id);
+  setTestBusy(btn, false);
+  btn.classList.add(ok ? 'field-card__test--ok' : 'field-card__test--fail');
+  btn.title = ok ? `${id} answered in ${ms} ms` : `${id}: ${error || 'no answer'}`;
+  toast(ok ? `${id} answered in ${ms} ms` : `${id} did not answer: ${error || 'no answer'}`);
+  btn.classList.remove('field-card__test--busy');
+}
+
+// The provider the endpoint named, or the id's own prefix when it named none.
+function providerOf(id: string): string {
+  const named = caps[stripMarker(id)]?.provider;
+  if (named) return named;
+  const slash = id.indexOf('/');
+  return slash > 0 ? id.slice(0, slash) : 'other';
 }
 
 function renderModels(): void {
-  if (!targetBuilt) {
-    targetBuilt = true;
-    $('modeltarget').replaceChildren(...targets().map(m =>
-      el('option', { value: m.key, text: m.label })));
-  }
-  // The <select> keeps its own choice; only its option list is ours to build.
-  const note = $('modelnote');
-  note.classList.toggle('err', !!modelError);
-  note.textContent = modelError
-    || `Reads /v1/models from the Base URL above, using the Auth token. ${loaded ? `${models.length} found.` : 'Nothing loaded yet.'}`;
-
   const shown = models
     .filter(m => m.toLowerCase().includes(filter.toLowerCase()))
-    // Marker stripped before lookup: the endpoint reports windows by plain id.
-    .filter(m => !only1m || (windows[stripMarker(m)] || 0) >= WINDOW_1M)
-    .filter(m => !onlyVision || vision[stripMarker(m)] === true);
-  // One element covers every empty case — nothing loaded, nothing returned, nothing
-  // matching the filter — so an empty grid never sits under a stale note.
-  const empty = $('modelempty');
-  const showEmpty = shown.length === 0;
-  empty.hidden = !showEmpty;
-  if (showEmpty) {
-    // Order matters: an explicit reason from the endpoint beats "it answered empty",
-    // and a filter that matched nothing beats both. Collapsing models:null into []
-    // loses that distinction, so modelError is checked before the loaded case.
-    const what = (() => {
-      const bits: string[] = [];
-      if (only1m) bits.push('1M');
-      if (onlyVision) bits.push('vision');
-      if (bits.length && !filter) return `no ${bits.join(' + ')} model in this list`;
-      if (bits.length) return `no ${bits.join(' + ')} model contains “${filter}”`;
-      return `No model name contains “${filter}”.`;
-    })();
-    const [title, body] = loaded && models.length
-      ? ['Nothing matches that filter', `${what} ${filter ? 'Clear the box' : 'Uncheck the filters'} to see all ${models.length}.`]
-      : modelError
-        ? ['Could not load models', modelError]
-        : loaded
-          ? ['The endpoint returned no models', 'It answered, but the list came back empty.']
-          : ['No models loaded yet', 'Press Load models to ask the endpoint for its list.'];
-    empty.replaceChildren(el('b', { text: title }), body);
+    // Markers stripped before lookup: the endpoint reports capabilities by plain id.
+    .filter(m => !only1m || (caps[stripMarker(m)]?.ctx || 0) >= WINDOW_1M)
+    .filter(m => !onlyVision || caps[stripMarker(m)]?.caps?.vision === true);
+
+  $('model-picker-count').textContent = loaded ? `${shown.length} of ${models.length}` : '';
+
+  const note = $('model-picker-note');
+  note.classList.toggle('note--error', !!modelError);
+  // What the endpoint reported, counted: a number here means the field is really
+  // there, and a zero says the endpoint stays quiet about that one.
+  const reported = (pick: (c: ModelCaps) => boolean): number =>
+    models.filter(m => { const c = caps[stripMarker(m)]; return c ? pick(c) : false; }).length;
+  const ctxCount = reported(c => (c.ctx || 0) > 0);
+  const visionCount = reported(c => c.caps?.vision === true);
+  const facts = loaded
+    ? `Read ${models.length} from ${modelsUrl} · ${ctxCount} with a context window · ${visionCount} accept images`
+    : '';
+  note.textContent = modelError || facts;
+
+  const list = $('model-picker-list');
+  const empty = (title: string, body: string): HTMLElement =>
+    el('div', { class: 'empty-state' }, el('b', { class: 'empty-state__title', text: title }), body);
+
+  if (!loaded && !modelError) {
+    list.replaceChildren(el('div', { class: 'loading' },
+      el('span', { class: 'loading__spinner' }), 'Reading /v1/models…'));
+    return;
   }
-  $('modellist').replaceChildren(...shown.map(modelRow));
-  // The column header only means anything above actual rows.
-  $('modelhead').hidden = shown.length === 0;
+  if (modelError) {
+    list.replaceChildren(empty('Could not load models', modelError));
+    return;
+  }
+  if (!models.length) {
+    list.replaceChildren(empty('The endpoint returned no models', 'It answered, but the list came back empty.'));
+    return;
+  }
+  if (!shown.length) {
+    const bits: string[] = [];
+    if (only1m) bits.push('1M');
+    if (onlyVision) bits.push('vision');
+    const what = bits.length
+      ? `No ${bits.join(' + ')} model${filter ? ` matching “${filter}”` : ''}.`
+      : `No model name contains “${filter}”.`;
+    list.replaceChildren(empty('Nothing matches those filters', `${what} Clear the filters to see all ${models.length}.`));
+    return;
+  }
+
+  // Grouped by provider, so a long list reads as a few short ones.
+  const byProvider = new Map<string, string[]>();
+  for (const id of shown) {
+    const p = providerOf(id);
+    const bucket = byProvider.get(p);
+    if (bucket) bucket.push(id); else byProvider.set(p, [id]);
+  }
+  list.replaceChildren(...[...byProvider.entries()].map(([provider, ids]) =>
+    el('section', { class: 'provider-group' },
+      el('h3', { class: 'provider-group__name' },
+        el('span', { text: provider }),
+        el('span', { class: 'provider-group__count', text: String(ids.length) })),
+      el('div', { class: 'provider-group__rows' }, ...ids.map(modelRow)))));
 }
 
-// The model picker's target list is per tool: Claude Code has five variables a
-// model can land in, everything else has exactly one.
-const targets = (): { key: string; label: string }[] => (tool.mode === 'simple' ? SIMPLE_TARGETS : MODEL_TARGETS);
-
-// One table row per model: click Assign to write that id into the chosen env variable.
-function modelRow(id: string): HTMLElement {
-  // Compared with markers stripped: env may hold "id[1m]" while the row is "id".
-  const base = stripMarker(id);
-  const selected = Object.values(targets()).some(m => stripMarker(String(env()[m.key] ?? '')) === base);
-  const w = windows[base];
-  const big = typeof w === 'number' && w >= WINDOW_1M;
-  // Absent from the vision map means the endpoint said nothing — no badge either
-  // way. Only an explicit false earns a "no vision" note, same honesty as windows.
-  const v = vision[base];
-  return el('div', { class: 'mrow', role: 'row' },
-    el('code', { text: id }),
-    el('span', { class: 'mtags' },
-      big ? el('span', { class: 'badge found', text: '1M', title: `${w.toLocaleString()} token window — Claude Code needs a [1m] suffix to use it` }) : null,
-      v === true ? el('span', { class: 'badge see', text: 'vision', title: 'Accepts image input' }) : null,
-      v === false ? el('span', { class: 'badge novis', text: 'no vision', title: 'Text input only, per the endpoint’s capability report' }) : null,
-      selected ? el('span', { class: 'badge cur', text: 'in use' }) : null),
-    el('button', {
-      class: 'ghost small', type: 'button', text: 'Assign',
-      title: `set ${($('modeltarget') as HTMLSelectElement).value} to ${withMarker(id).value}`,
-      onclick: () => useModel(id),
-    }));
-}
-
-// The id as it should be written: the plain id, plus [1m] when the endpoint says the
-// model's window is a million tokens or more. Claude Code would otherwise assume 200K.
-// An endpoint that reports no window gets no marker — guessing here would tell Claude
-// Code a model is 1M when it may not be, which breaks auto-compact rather than helps.
-//
-// The marker is a Claude Code convention, so it is only ever added for Claude Code.
+// The id as it should be written: plain, plus [1m] when the endpoint reports a 1M
+// window. An unreported window gets no marker, and only Claude Code ever gets one.
 function withMarker(id: string): { value: string; added: boolean; known: boolean } {
   const base = stripMarker(id);
-  const w = windows[base];
-  const known = typeof w === 'number';
+  const w = caps[base]?.ctx;
+  const known = typeof w === 'number' && w > 0;
   const want = tool.mode === 'env' && known && w >= WINDOW_1M;
   return { value: want ? `${base}[1m]` : base, added: want && !CONTEXT_MARKER.test(id), known };
 }
 
-// Sets the variable and refreshes that one input in place, so a click in the
-// models tab never loses the caret or scroll position of the env form.
+// Writes the pick into the field that opened the dialog and closes it.
 function useModel(id: string): void {
-  const key = ($('modeltarget') as HTMLSelectElement).value;
+  if (!targetKey) return;
+  const key = targetKey;
   const { value, added, known } = withMarker(id);
   setEnv(key, value);
-  const input = document.getElementById(`f_${key}`) as HTMLInputElement | null;
+  const input = fieldInput(key);
   if (input) input.value = value;
-  const label = targets().find(m => m.key === key);
+  const f = fieldOf(key);
   // The no-window note is only meaningful where a marker was in play at all.
-  const why = added ? ' — added [1m], the endpoint reports a 1M window'
-    : known || tool.mode === 'simple' ? '' : ' — the endpoint reports no context window, so [1m] was left off';
-  toast(`${tool.mode === 'simple' ? '' : 'env.'}${key} = ${value}${label ? ` (${label.label})` : ''}${why} — Save to write it`);
-  renderModels();
+  const why = added ? '. Added [1m], the endpoint reports a 1M window'
+    : known || tool.mode === 'simple' ? '' : '. The endpoint reports no context window, so [1m] was left off';
+  toast(`${tool.mode === 'simple' ? '' : 'env.'}${key} = ${value}${f ? ` (${f.label})` : ''}${why}. Save to write it`);
+  renderModels();   // the row's "in use" badge follows the pick
+  closePicker();
 }
 
-async function loadModels(): Promise<void> {
-  const btn = $('loadmodels') as HTMLButtonElement;
+async function loadModels(force: boolean): Promise<void> {
+  // Read through the seam, so this also works for a tool using baseUrl/apiKey.
+  const baseUrl = env()[tool.mode === 'simple' ? 'baseUrl' : 'ANTHROPIC_BASE_URL'] || '';
+  const apiKey = env()[tool.mode === 'simple' ? 'apiKey' : 'ANTHROPIC_AUTH_TOKEN'] || '';
+  // Re-read only when the endpoint changes, when the last read failed, or on demand.
+  const sig = `${baseUrl}\n${apiKey}`;
+  if (!force && loaded && sig === loadedFor) return;
+  if (!baseUrl) {
+    // The server needs a URL, and the default Anthropic API is not listable here.
+    loaded = false;
+    models = [];
+    caps = {};
+    modelError = 'No Base URL is set. Fill in the Base URL field, then reopen this picker.';
+    renderModels();
+    return;
+  }
+
+  const btn = $('model-picker-reload') as HTMLButtonElement;
   btn.disabled = true;
-  btn.textContent = 'Loading…';
+  btn.classList.add('button--busy');
+  // A fetch in flight is not a loaded list: the count, the note and the rows all go,
+  // and the list shows its spinner. Leaving `loaded` true here painted a stale count
+  // over a list that was being replaced.
+  loaded = false;
   modelError = '';
+  renderModels();   // the list shows its spinner
   try {
-    // Read through the seam, so this works for a tool whose keys are not the
-    // ANTHROPIC_* ones — the simple tools call the same two values baseUrl/apiKey.
-    const baseUrl = env()[tool.mode === 'simple' ? 'baseUrl' : 'ANTHROPIC_BASE_URL'] || '';
-    const apiKey = env()[tool.mode === 'simple' ? 'apiKey' : 'ANTHROPIC_AUTH_TOKEN'] || '';
     const r = await fetch('/api/models', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ baseUrl, apiKey }),
     });
     const j: ModelsResponse = await r.json();
-    // A 404 here is almost always a server.js started before this route existed:
-    // the file is read once at boot, so an old process serves an old route table.
+    // A 404 is almost always a server.js started before this route existed.
     if (r.status === 404) {
-      throw new Error('this server has no /api/models route — restart server.js and reload this page.');
+      throw new Error('this server has no /api/models route. Restart server.js and reload this page.');
     }
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
     models = (j.models || []).slice().sort((a, b) => a.localeCompare(b));
-    windows = j.windows || {};
-    vision = j.vision || {};
+    caps = j.caps || {};
+    modelsUrl = j.url || '';
     loaded = true;
+    loadedFor = sig;
+    // Keep the endpoint's own reason: "it returned no models" loses why.
     modelError = j.models ? '' : (j.error || 'this endpoint does not provide a model list.');
   } catch (e) {
     models = [];
-    vision = {};
+    caps = {};
     loaded = false;
     modelError = `Could not load models: ${(e as Error).message}`;
   } finally {
+    btn.classList.remove('button--busy');
     btn.disabled = false;
-    btn.textContent = 'Load models';
     renderModels();
   }
 }
@@ -595,83 +956,99 @@ async function loadModels(): Promise<void> {
 // ---------------------------------------------------------------------- io
 
 let toastTimer = 0;
+// A popover, not a z-index: a modal <dialog> lives in the top layer, where no z-index
+// reaches. A popover lives there too — but showing it once is not enough. The dialog
+// that opens later is inserted after it in the top layer and paints over it, so every
+// toast re-promotes itself. hidePopover() on an open popover is a no-op, not an error,
+// which is why the pair can run unconditionally.
+type Popover = HTMLElement & { showPopover?: () => void; hidePopover?: () => void };
+const toastEl = (): Popover => $('toast') as Popover;
+
 function toast(msg: string): void {
-  const t = $('toast');
+  const t = toastEl();
   t.textContent = msg;
-  t.classList.add('on');
+  // Re-promote: without this the second toast of a session paints behind the picker.
+  try { t.hidePopover?.(); } catch { /* not open */ }
+  try { t.showPopover?.(); } catch { /* unsupported */ }
+  t.classList.add('toast--shown');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('on'), 2600);
+  toastTimer = setTimeout(() => t.classList.remove('toast--shown'), 2600);
 }
 
-// A message about the file that was open a moment ago is worse than none: switching
-// tool leaves the old one on screen otherwise, naming a variable this tool has not got.
 function hideToast(): void {
   clearTimeout(toastTimer);
-  $('toast').classList.remove('on');
-  $('toast').textContent = '';
+  const t = toastEl();
+  t.classList.remove('toast--shown');
+  t.textContent = '';
+  try { t.hidePopover?.(); } catch { /* already closed */ }
 }
 
 async function load(): Promise<void> {
   const s: SettingsResponse = await fetch(`/api/settings?tool=${encodeURIComponent(tool.id)}`).then(r => r.json());
-  if (!s.selected) { showLanding(); return; }
+  if (!s.selected) { closeEditor(); return; }
 
   filePath = s.file || '';
   baseMtimeMs = s.mtimeMs || 0;
 
   const bs: HTMLElement[] = [];
   if (tool.mode === 'simple') {
-    values = { baseUrl: '', apiKey: '', model: '', ...(s.values || {}) };
+    values = { ...(s.values || {}) };
     doc = {};
   } else {
     doc = s.parsed || {};
     if (!s.exists) {
-      bs.push(el('div', { class: 'banner warn' },
+      bs.push(el('div', { class: 'banner banner--warn' },
         el('b', { text: 'settings.json was not found. ' }),
         `Nothing at ${filePath}. Fill in a field and Save to create it.`));
     }
     if (s.exists && !s.parseError && Object.keys(env()).length === 0) {
-      bs.push(el('div', { class: 'banner warn' }, 'No env block in this file yet — filling in a field creates it.'));
+      bs.push(el('div', { class: 'banner banner--warn' }, 'No env block in this file yet. Filling in a field creates it.'));
+    }
+    // A reformat the user agreed to is not the same as one they discover in git.
+    if (s.normalized) {
+      bs.push(el('div', { class: 'banner banner--warn' },
+        el('b', { text: 'This file is not in canonical JSON form. ' }),
+        'Saving rewrites the whole document: indentation and spacing may change. Keys are kept.'));
     }
   }
   if (s.parseError) {
-    bs.push(el('div', { class: 'banner err' },
+    bs.push(el('div', { class: 'banner banner--error' },
       el('b', { text: 'This file is not valid. ' }), s.parseError,
-      ' — saving is disabled so the broken file is not overwritten.'));
+      '. Saving is disabled so the broken file is not overwritten.'));
   } else if (!s.exists) {
-    // The simple-mode files are usually written by the tool itself on first run, so
-    // a missing one is worth saying out loud rather than quietly creating.
-    bs.push(el('div', { class: 'banner warn' },
+    // These files are usually written by the tool itself, so a missing one is worth saying.
+    bs.push(el('div', { class: 'banner banner--warn' },
       el('b', { text: `${tool.name} has no config file yet. ` }),
       `Nothing at ${filePath}. Saving creates it.`));
   }
 
   dirty = false;
-  $('dot').classList.remove('on');
+  $('actionbar-dot').classList.remove('actionbar__dot--dirty');
   ($('save') as HTMLButtonElement).disabled = !!s.parseError;
-  $('banners').replaceChildren(...bs);
+  $('editor-banners').replaceChildren(...bs);
   // A fresh file means the previous list belongs to a different endpoint.
   models = [];
-  windows = {};
-  vision = {};
+  caps = {};
   loaded = false;
   modelError = '';
   filter = '';
   only1m = false;
   onlyVision = false;
-  targetBuilt = false;   // the target list is per tool, so it is rebuilt on every load
-  ($('modelfilter') as HTMLInputElement).value = '';
-  ($('only1m') as HTMLInputElement).checked = false;
-  ($('onlyvision') as HTMLInputElement).checked = false;
-  showTab('paneenv');
+  modelsUrl = '';
+  loadedFor = '';
+  targetKey = '';
+  ($('model-picker-filter') as HTMLInputElement).value = '';
+  ($('filter-1m') as HTMLInputElement).checked = false;
+  ($('filter-vision') as HTMLInputElement).checked = false;
   render();
   // A broken file still gets its banners and path, but no fields to edit.
-  $('form').style.display = s.parseError ? 'none' : '';
-  $('panemodels').style.display = s.parseError ? 'none' : '';
+  $('editor-form').style.display = s.parseError ? 'none' : '';
 }
 
 async function save(): Promise<void> {
   const btn = $('save') as HTMLButtonElement;
   btn.disabled = true;
+  btn.classList.add('button--busy');
   const simple = tool.mode === 'simple';
   try {
     const r = await fetch('/api/settings', {
@@ -684,32 +1061,33 @@ async function save(): Promise<void> {
     const j = await r.json();
     if (r.status === 409) {
       // Keep the draft: reloading here would throw away what the user just typed.
-      $('banners').replaceChildren(el('div', { class: 'banner err' },
-        el('b', { text: 'Not saved — the file changed on disk. ' }),
+      $('editor-banners').replaceChildren(el('div', { class: 'banner banner--error' },
+        el('b', { text: 'Not saved: the file changed on disk. ' }),
         `${tool.name} (or another editor) wrote it since this page loaded. Your edits are still here. `,
         'Reload to discard them, or Save again to overwrite.'));
       baseMtimeMs = j.mtimeMs;
-      btn.disabled = false;
       return;
     }
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
     baseMtimeMs = j.mtimeMs;
     dirty = false;
-    $('dot').classList.remove('on');
+    $('actionbar-dot').classList.remove('actionbar__dot--dirty');
     toast(`saved ${j.bytes} bytes → ${prettyPath(j.file)}${j.backup ? ' (previous version backed up)' : ''}`);
   } catch (e) {
-    $('banners').replaceChildren(
-      el('div', { class: 'banner err' }, `Save failed: ${(e as Error).message}`));
-    btn.disabled = false;
+    $('editor-banners').replaceChildren(
+      el('div', { class: 'banner banner--error' }, `Save failed: ${(e as Error).message}`));
+  } finally {
+    // One exit for every path: a save that failed must still hand the button back, and
+    // a save that worked must leave it disabled — there is nothing left to write.
+    btn.classList.remove('button--busy');
+    btn.disabled = !dirty;
   }
 }
 
 // ---------------------------------------------------------------- theme
 
-// Manual light/dark toggle. No choice stored means CSS follows the OS via
-// :root:not([data-theme]); a stored choice wins via [data-theme]. Guarded for
-// non-browser shims (check-ui), where localStorage/matchMedia/documentElement
-// do not exist — the page still works, it just keeps the default theme.
+// A stored choice wins; with none, the CSS follows the OS. Guarded for the check-ui
+// shim, where localStorage and matchMedia do not exist.
 function storedTheme(): 'light' | 'dark' | null {
   try {
     const t = typeof localStorage !== 'undefined' ? localStorage.getItem('theme') : null;
@@ -734,10 +1112,13 @@ function currentTheme(): 'light' | 'dark' {
 }
 
 function syncThemeButton(t: 'light' | 'dark'): void {
-  const btn = document.getElementById('theme');
+  const btn = document.querySelector('[data-js="theme-toggle"]') as HTMLElement | null;
   if (!btn) return;
   const dark = t === 'dark';
-  btn.replaceChildren(icon(dark ? 'sun' : 'moon'));
+  // Swap the glyph only: the button also carries its label span.
+  const glyph = btn.querySelector('.icon');
+  const next = icon(dark ? 'sun' : 'moon');
+  if (glyph) glyph.replaceWith(next); else btn.prepend(next);
   const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
   btn.title = label;
   btn.setAttribute('aria-label', label);
@@ -756,11 +1137,10 @@ function paintTheme(t: 'light' | 'dark'): void {
 
 function initTheme(): void {
   syncThemeButton(currentTheme());
-  $('theme').addEventListener('click', () => {
+  $('theme-toggle').addEventListener('click', () => {
     paintTheme(currentTheme() === 'dark' ? 'light' : 'dark');
   });
-  // No manual choice: keep the icon in step when the OS flips. The CSS follows
-  // on its own; only the button needs refreshing.
+  // With no manual choice, keep the icon in step when the OS flips.
   try {
     const mq = typeof matchMedia !== 'undefined' ? matchMedia('(prefers-color-scheme: dark)') : null;
     mq?.addEventListener?.('change', () => {
@@ -771,13 +1151,20 @@ function initTheme(): void {
 
 // ---------------------------------------------------------------- wire up
 
-// Reload only ever runs from the editor, so a failure belongs in its banners —
-// obnote lives on the landing screen and would be invisible from here.
+// Reload runs from the editor, so a failure belongs in its banners, not the rail note.
 function reload(): void {
-  load().catch(e => {
-    $('banners').replaceChildren(
-      el('div', { class: 'banner err' }, `Failed to load: ${(e as Error).message}`));
-  });
+  const btn = $('reload') as HTMLButtonElement;
+  btn.disabled = true;
+  btn.classList.add('button--busy');
+  load()
+    .catch(e => {
+      $('editor-banners').replaceChildren(
+        el('div', { class: 'banner banner--error' }, `Failed to load: ${(e as Error).message}`));
+    })
+    .finally(() => {
+      btn.classList.remove('button--busy');
+      btn.disabled = false;
+    });
 }
 
 $('reload').addEventListener('click', () => {
@@ -787,46 +1174,54 @@ $('reload').addEventListener('click', () => {
 
 $('save').addEventListener('click', () => { void save(); });
 
-$('scanbtn').addEventListener('click', () => {
-  if (dirty && !confirm('Discard unsaved changes and scan again?')) return;
+// The button only exists while the editor is open, so it needs no state check. It
+// always lands on the picker: the sidebar's way out is the landing page, not one
+// step back through whatever tools were opened before.
+$('editor-back').addEventListener('click', () => {
+  if (dirty && !confirm('Discard unsaved changes and go back to the tool list?')) return;
   dirty = false;
-  void scan();
+  closeEditor();
 });
 
-$('switch').addEventListener('click', () => {
-  if (dirty && !confirm('Discard unsaved changes and start over?')) return;
-  dirty = false;
-  hideToast();
-  showLanding();
-});
-
-$('addvar').addEventListener('click', () => {
+$('other-vars-add').addEventListener('click', () => {
   if (tool.mode === 'simple') return;   // the section is not offered for these tools
-  const input = $('newkey') as HTMLInputElement;
+  const input = $('other-vars-new') as HTMLInputElement;
   const k = input.value.trim();
   if (!k) return;
-  setEnv(k, '');
+  // A name this editor already owns clears that field's card instead.
+  if (KNOWN.has(k)) { setEnv(k, ''); refreshCard(k); return; }
+  // Rows, not env: an untouched new row has no value in env yet, so env cannot tell
+  // "listed" from "not listed" and asking twice would stack a second row.
+  const listed = [...$('other-vars-list').children].map(c => c.getAttribute('data-key'));
+  if (listed.includes(k)) return;
   input.value = '';
-  render();
+  $('other-vars').hidden = false;
+  $('other-vars-list').append(otherRow(k));
+  $('other-vars-count').textContent = String($('other-vars-list').children.length);
 });
 
-$('newkey').addEventListener('keydown', (e: Event) => {
-  if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); $('addvar').click(); }
+$('other-vars-new').addEventListener('keydown', (e: Event) => {
+  if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); $('other-vars-add').click(); }
 });
 
-$('loadmodels').addEventListener('click', () => { void loadModels(); });
+$('model-picker-reload').addEventListener('click', () => { void loadModels(true); });
 
-$('modelfilter').addEventListener('input', (e: Event) => {
+$('model-picker-close').addEventListener('click', closePicker);
+
+// A click outside the panel closes it.
+$('model-picker').addEventListener('click', onPickerClick);
+
+$('model-picker-filter').addEventListener('input', (e: Event) => {
   filter = (e.target as HTMLInputElement).value;
   renderModels();
 });
 
-$('only1m').addEventListener('change', (e: Event) => {
+$('filter-1m').addEventListener('change', (e: Event) => {
   only1m = (e.target as HTMLInputElement).checked;
   renderModels();
 });
 
-$('onlyvision').addEventListener('change', (e: Event) => {
+$('filter-vision').addEventListener('change', (e: Event) => {
   onlyVision = (e.target as HTMLInputElement).checked;
   renderModels();
 });
@@ -835,10 +1230,8 @@ addEventListener('beforeunload', (e: BeforeUnloadEvent) => {
   if (dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// The tool registry, fetched once at boot so the picker is drawn from the server's
-// own list rather than a copy kept in this file. A failure is not fatal: the picker
-// falls back to the one tool this page can name on its own, and the scan that
-// follows carries the registry anyway.
+// Fetched once at boot, so the picker comes from the server's list rather than a copy.
+// A failure is not fatal: the scan that follows carries the registry anyway.
 async function loadTools(): Promise<void> {
   try {
     const r = await fetch('/api/tools');
@@ -846,10 +1239,50 @@ async function loadTools(): Promise<void> {
     const j: { tools?: Tool[] } = await r.json();
     if (Array.isArray(j.tools) && j.tools.length) { tools = j.tools; renderTools(); }
   } catch { /* the landing still works with the default tool */ }
+  // A link to a tool opens that tool, once the registry that names it has arrived.
+  const t = toolFromUrl();
+  if (t) openTool(t);
 }
 
-// Open on the landing screen: the scan button is the entry point, always.
+// One scroll listener drives both the back-to-top button and the header's stuck state.
+const topBtn = $('to-top');
+const actionbar = $('actionbar');
+const scrollPos = (): number =>
+  typeof scrollY === 'number' ? scrollY : document.documentElement?.scrollTop || 0;
+
+function onScroll(): void {
+  const y = scrollPos();
+  topBtn.classList.toggle('to-top--shown', y > 400);
+  actionbar.classList.toggle('actionbar--stuck', y > 8);
+}
+addEventListener('scroll', onScroll, { passive: true });
+
+$('to-top').addEventListener('click', () => {
+  if (typeof scrollTo !== 'function') return;
+  let calm = false;
+  try { calm = matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { /* no matchMedia */ }
+  scrollTo({ top: 0, behavior: calm ? 'auto' : 'smooth' });
+});
+
+// The launcher opens a console window that is easy to forget, so the page can close
+// it. Confirm first: there is no way back from here except starting it again.
+$('stop-server').addEventListener('click', () => {
+  if (!confirm('Stop the server? The page will stop working until you start it again.')) return;
+  fetch('/api/shutdown', { method: 'POST' })
+    .then(() => {
+      document.body.innerHTML = '';
+      document.body.append(el('div', { class: 'loading' }, 'Server stopped. You can close this tab.'));
+    })
+    .catch(() => { /* the server went down before the reply landed; that is the point */ });
+});
+
+// Open on the picker. Picking a card is the entry point — there is no Scan button
+// and no second page, so nothing else needs booting.
 initTheme();
-renderTabs();
-showLanding();
+$('model-picker-close').append(icon('xmark'));
+$('model-picker-reload').append(icon('refresh'));
+$('to-top').append(icon('arrowUp'));
+$('stop-server').prepend(icon('power'));
+renderTools();
 void loadTools();
+onScroll();
