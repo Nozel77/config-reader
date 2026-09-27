@@ -121,40 +121,142 @@ await sleep(1200);
 await shot(join(OUT, '01-landing.png'));
 await shot(join(OUT, '02-landing-dark.png'), { dark: true });
 
-// --- editor: press Scan, wait for the form ---
-await evaluate(`document.getElementById('scanbtn').click()`);
+// --- the landing on a phone: the header stack and the footer ---
+await cmd('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 2, mobile: true });
+await sleep(500);
+await shot(join(OUT, '17-phone-landing.png'), { full: false });
+await cmd('Emulation.clearDeviceMetricsOverride');
+await sleep(400);
+
+// --- the landing card lifts on hover ----------------------------------------–
+// Guards the entrance animation: with fill-mode `both` the finished animation keeps
+// applying translate: 0 0, and an applied animation outranks the hover rule, so the
+// card would never move. Read the computed value, not the pixels.
+const cardBox = JSON.parse(await evaluate(`(()=>{const r=document.querySelector('.tool-card').getBoundingClientRect();return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});})()`));
+await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cardBox.x, y: cardBox.y, buttons: 0 });
+await sleep(400);
+console.log('landing card hover:', await evaluate(`getComputedStyle(document.querySelector('.tool-card')).translate`));
+
+// --- editor: pick the first card, which scans and opens the form ---
+await evaluate(`document.querySelector('.tool-card').click()`);
 for (let i = 0; i < 40; i++) {
-  if (await evaluate(`!document.getElementById('editor').hidden`)) break;
+  if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
   await sleep(250);
 }
 await sleep(400);
 await shot(join(OUT, '03-editor.png'));
 await shot(join(OUT, '04-editor-dark.png'), { dark: true });
 
-// --- models tab: load the real list ---
-await evaluate(`[...document.querySelectorAll('.tab')].find(t=>t.textContent==='Models').click()`);
-await sleep(200);
-await shot(join(OUT, '05-models-empty.png'));
-await evaluate(`document.getElementById('loadmodels').click()`);
-for (let i = 0; i < 60; i++) {
-  if (await evaluate(`document.getElementById('modellist').children.length > 0`)) break;
-  await sleep(250);
-}
+// --- the description behind the "?" -------------------------------------------
+// The hint is a row's only prose now, so it has to survive being hovered.
+const hintBox = JSON.parse(await evaluate(`(()=>{const r=document.querySelector('.hint').getBoundingClientRect();return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});})()`));
+await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hintBox.x, y: hintBox.y, buttons: 0 });
 await sleep(400);
-const n = await evaluate(`document.getElementById('modellist').children.length`);
-console.log('models rendered:', n);
-await shot(join(OUT, '06-models.png'));
-await shot(join(OUT, '07-models-dark.png'), { dark: true });
+console.log('hint tip:', await evaluate(`getComputedStyle(document.querySelector('.hint'), '::after').opacity`),
+  await evaluate(`document.querySelector('.hint').getAttribute('data-tip')`));
+await shot(join(OUT, '19-hint.png'), { full: false });
 
-// --- a filter that matches nothing ---
-await evaluate(`(()=>{const f=document.getElementById('modelfilter');f.value='zzz';f.dispatchEvent(new Event('input'));})()`);
+// --- the form's own test button, on the row that holds the model --------------
+const probeBtn = await evaluate(`(()=>{
+  const card=[...document.querySelectorAll('[data-js="editor-form"] .field-card')]
+    .find(f=>f.getAttribute('data-card')==='ANTHROPIC_DEFAULT_OPUS_MODEL');
+  const btn=card.querySelector('.field-card__test');
+  if(!btn) return 'no test button';
+  btn.click();
+  return 'clicked';
+})()`);
+console.log('form test:', probeBtn);
+await sleep(8000);
+console.log('form test result:', await evaluate(`(()=>{
+  const card=[...document.querySelectorAll('[data-js="editor-form"] .field-card')]
+    .find(f=>f.getAttribute('data-card')==='ANTHROPIC_DEFAULT_OPUS_MODEL');
+  const btn=card.querySelector('.field-card__test');
+  return JSON.stringify({ cls: btn.className, title: btn.title, hasIcon: !!btn.querySelector('.icon') });
+})()`));
+await shot(join(OUT, '23-form-test.png'), { full: false });
+
+// --- scrolled: the header lifts and the back-to-top button shows itself ------–
+// The two things a static shot cannot show, asserted rather than eyeballed.
+await evaluate(`window.scrollTo({ top: 1400, behavior: 'auto' })`);
+await sleep(500);
+console.log('scroll chrome:', await evaluate(`JSON.stringify({
+  top: document.querySelector('[data-js="to-top"]').classList.contains('to-top--shown'),
+  stuck: document.querySelector('[data-js="actionbar"]').classList.contains('actionbar--stuck'),
+  barTop: Math.round(document.querySelector('[data-js="actionbar"]').getBoundingClientRect().top),
+})`));
+await shot(join(OUT, '16-scrolled.png'), { full: false });
+await evaluate(`window.scrollTo({ top: 0, behavior: 'auto' })`);
 await sleep(300);
-await shot(join(OUT, '08-filter-miss.png'), { full: false });
 
-// --- hover reveals the Assign button (mouse only) ---
-await evaluate(`(()=>{const f=document.getElementById('modelfilter');f.value='claude-opus-5';f.dispatchEvent(new Event('input'));})()`);
+// --- models: open the picker dialog from the Model field's fetch button ------
+// The picker is a modal now, so this is the one field button, not a tab.
+const openPicker = async key => {
+  await evaluate(`(()=>{
+    const card=[...document.querySelectorAll('[data-js="editor-form"] .field-card')]
+      .find(f=>f.getAttribute('data-card')===${JSON.stringify(key)});
+    card.querySelector('.field-card__row').querySelectorAll('button')[0].click();
+  })()`);
+  for (let i = 0; i < 60; i++) {
+    // Wait for actual rows: the loading state is a child of the list too, so a
+    // "children.length > 0" check passes before any model has arrived.
+    if (await evaluate(`document.querySelectorAll('[data-js="model-picker-list"] .model-row').length > 0`)) break;
+    await sleep(250);
+  }
+  await sleep(400);
+};
+await openPicker('ANTHROPIC_MODEL');
+const n = await evaluate(`document.querySelectorAll('[data-js="model-picker-list"] .model-row').length`);
+console.log('models rendered:', n);
+// What the live endpoint made the picker say: the note's counts, the badges on the
+// rows, and one row's tooltip. Printed so a real gateway is verified by reading.
+console.log('picker note:', await evaluate(`document.querySelector('[data-js="model-picker-note"]').textContent`));
+console.log('picker badges:', await evaluate(`(()=>{
+  const rows=[...document.querySelectorAll('[data-js="model-picker-list"] .model-row')];
+  const n=cls=>rows.filter(r=>r.querySelector('.'+cls)).length;
+  return JSON.stringify({ rows: rows.length, free: n('badge--free'), sunset: n('badge--warn'),
+    chips: rows.reduce((a,r)=>a+r.querySelectorAll('.cap').length,0),
+    // A filter that looks on but is off would show the wrong list under a wrong box.
+    filters: { oneM: document.querySelector('[data-js="filter-1m"]').checked,
+               vision: document.querySelector('[data-js="filter-vision"]').checked } });
+})()`));
+console.log('a row tooltip:', await evaluate(`(()=>{
+  const r=[...document.querySelectorAll('[data-js="model-picker-list"] .model-row')].find(x=>x.querySelector('.badge--free'));
+  return r ? r.querySelector('.model-row__use').title.replace(/\\n/g,' | ') : 'no free model in this list';
+})()`));
+await shot(join(OUT, '05-picker.png'));
+await shot(join(OUT, '06-picker-dark.png'), { dark: true });
+
+// --- the filter narrows it, and the provider grouping -----------------------
+await evaluate(`(()=>{const f=document.querySelector('[data-js="model-picker-filter"]');f.value='claude';f.dispatchEvent(new Event('input'));})()`);
+await sleep(300);
+console.log('filtered to:', await evaluate(`document.querySelectorAll('[data-js="model-picker-list"] .model-row').length`));
+await shot(join(OUT, '08-filter.png'), { full: false });
+await evaluate(`(()=>{const f=document.querySelector('[data-js="model-picker-filter"]');f.value='';f.dispatchEvent(new Event('input'));})()`);
+await sleep(200);
+console.log('groups:', await evaluate(`JSON.stringify([...document.querySelectorAll('.provider-group__name')].map(n=>n.textContent))`));
+
+// --- the health check: one tiny request, to a model the gateway says is free ----
+// Free models cost nothing, so a failure means the endpoint is down rather than out
+// of credit. Which ones are free differs per gateway, so the list decides, not us.
+const tested = await evaluate(`(async()=>{
+  const rows=[...document.querySelectorAll('[data-js="model-picker-list"] .model-row')];
+  const free=rows.find(r=>r.querySelector('.badge--free')) || rows.find(r=>/free/i.test(r.dataset.model)) || rows[0];
+  if(!free) return 'no rows to test';
+  const btn=free.querySelector('.model-row__test');
+  btn.click();
+  for (let i=0;i<120;i++){ if(!btn.classList.contains('model-row__test--busy')) break; await new Promise(r=>setTimeout(r,250)); }
+  return JSON.stringify({ model: free.dataset.model, label: btn.title, cls: btn.className });
+})()`);
+console.log('health check:', tested);
+await shot(join(OUT, '18-test.png'), { full: false });
+
+// --- hover reveals the lift (mouse only) ---
+// The name comes off the loaded list: the endpoint is whatever this machine points at,
+// so a hardcoded model id is a screenshot that only works on one laptop.
+const firstModel = await evaluate(`document.querySelector('[data-js="model-picker-list"] .model-row code').textContent`);
+await evaluate(`(()=>{const f=document.querySelector('[data-js="model-picker-filter"]');f.value=${JSON.stringify(firstModel)};f.dispatchEvent(new Event('input'));})()`);
 await sleep(250);
-const box = await evaluate(`(()=>{const r=document.getElementById('modellist').children[0].getBoundingClientRect();return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});})()`);
+const box = await evaluate(`(()=>{const r=document.querySelector('[data-js="model-picker-list"] .model-row').getBoundingClientRect();return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});})()`);
 const { x, y } = JSON.parse(box);
 await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
 await sleep(400);
@@ -163,25 +265,32 @@ await shot(join(OUT, '09-assign-hover.png'), { full: false });
 // --- a narrow viewport, to check the layout does not break on a phone ---
 await cmd('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 2, mobile: true });
 await sleep(400);
-await shot(join(OUT, '10-phone-models.png'), { full: false });
-await evaluate(`document.querySelectorAll('.tab')[0].click()`);
+console.log('phone picker overflow:', await evaluate(`(()=>{
+  const list=document.querySelector('[data-js="model-picker-list"]');
+  const rows=[...list.querySelectorAll('.model-row')];
+  const box=list.getBoundingClientRect();
+  const worst=rows.reduce((m,r)=>Math.max(m, r.getBoundingClientRect().right), 0);
+  return JSON.stringify({ listRight: Math.round(box.right), worstRowRight: Math.round(worst),
+    overflow: Math.round(worst - box.right), docScroll: document.documentElement.scrollWidth });
+})()`));
+await shot(join(OUT, '10-phone-picker.png'), { full: false });
+await evaluate(`document.querySelector('[data-js="model-picker-close"]').click()`);
 await sleep(300);
 await shot(join(OUT, '11-phone-env.png'));
 await cmd('Emulation.clearDeviceMetricsOverride');
 
-// --- the 1M marker: assign a 1M model and read back what landed in env ---------
+// --- the 1M marker: assign a model and read back what landed in env ------------
 // Claude Code only honours a 1M window when the model name ends in [1m], so this
-// asserts the editor adds it — and leaves it off for a model below 1M.
-await evaluate(`(()=>{const f=document.getElementById('modelfilter');f.value='';f.dispatchEvent(new Event('input'));})()`);
-await evaluate(`[...document.querySelectorAll('.tab')].find(t=>t.textContent==='Models').click()`);
-await sleep(200);
+// reports what the editor wrote for the first two models the endpoint offers.
+await openPicker('ANTHROPIC_MODEL');
 const marked = await evaluate(`(()=>{
-  const rows=[...document.getElementById('modellist').children];
-  const pick=id=>{const r=rows.find(r=>r.querySelector('code').textContent===id);if(!r)return 'row missing';
-    r.querySelectorAll('button')[0].click();return document.getElementById('f_ANTHROPIC_MODEL').value;};
-  const oneM=pick('knr/deepseek-v4-1-flash');
-  const small=pick('knr/agnes-2-0-flash:free');
-  return JSON.stringify({oneM,small});
+  const rows=[...document.querySelectorAll('[data-js="model-picker-list"] .model-row')];
+  // The row is a div; the button inside it is what assigns.
+  const pick=r=>{r.querySelector('.model-row__use').click();return document.querySelector('[data-field="ANTHROPIC_MODEL"]').value;};
+  const first=pick(rows[0]);
+  rows[0].querySelector('.model-row__use').click();
+  const second=pick(rows[1]||rows[0]);
+  return JSON.stringify({first, second});
 })()`);
 console.log('marker check:', marked);
 await shot(join(OUT, '12-marker.png'), { full: false });
@@ -189,31 +298,81 @@ await shot(join(OUT, '12-marker.png'), { full: false });
 // --- a non-Claude tool: three fields, patched into its own config format ------
 // Back to the landing first, then pick Codex from the tool cards. The switch guard
 // is a confirm(), which blocks a headless renderer until it is answered.
-await evaluate(`window.confirm = () => true; document.getElementById('switch').click()`);
+await evaluate(`window.confirm = () => true; document.querySelector('[data-js="editor-back"]').click()`);
 await sleep(300);
 await shot(join(OUT, '13-landing-picker.png'), { full: false });
 const picked = await evaluate(`(()=>{
-  const card=[...document.querySelectorAll('.tool')].find(c=>c.textContent.includes('Codex'));
+  const card=[...document.querySelectorAll('.tool-card')].find(c=>c.textContent.includes('Codex'));
   if(!card) return 'card missing';
   card.click();
-  document.getElementById('scanbtn').click();
   return card.textContent;
 })()`);
 console.log('picked:', picked);
 for (let i = 0; i < 40; i++) {
-  if (await evaluate(`!document.getElementById('editor').hidden`)) break;
+  if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
   await sleep(250);
 }
 await sleep(400);
 await shot(join(OUT, '14-codex.png'));
 await shot(join(OUT, '15-codex-dark.png'), { dark: true });
 const simple = await evaluate(`JSON.stringify({
-  title: document.getElementById('title').textContent,
-  fields: [...document.querySelectorAll('#form .fkey')].map(e=>e.textContent),
-  others: document.getElementById('others').hidden,
-  targets: document.getElementById('modeltarget').children.length,
+  title: document.querySelector('[data-js="editor-title"]').textContent,
+  fields: [...document.querySelectorAll('[data-js="editor-form"] .field-card')].map(e=>e.getAttribute('data-card')),
+  others: document.querySelector('[data-js="other-vars"]').hidden,
+  pickers: document.querySelectorAll('[data-js="editor-form"] .field-card__row button').length,
 })`);
 console.log('codex editor:', simple);
+
+// --- Hermes: the default model plus the role slots it reads -------------------
+await evaluate(`window.confirm = () => true; document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(300);
+const pickedHermes = await evaluate(`(()=>{
+  const card=[...document.querySelectorAll('.tool-card')].find(c=>c.textContent.includes('Hermes'));
+  if(!card) return 'card missing';
+  card.click();
+  return card.textContent;
+})()`);
+console.log('picked:', pickedHermes);
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
+  await sleep(250);
+}
+await sleep(400);
+console.log('hermes editor:', await evaluate(`JSON.stringify({
+  fields: [...document.querySelectorAll('[data-js="editor-form"] .field-card')].map(e=>e.getAttribute('data-card')),
+  groups: [...document.querySelectorAll('.field-group__title')].map(e=>e.textContent),
+})`));
+await shot(join(OUT, '20-hermes.png'));
+await shot(join(OUT, '21-hermes-dark.png'), { dark: true });
+
+// --- routing: a link straight to a tool opens it, and Back closes it ----------
+await cmd('Page.navigate', { url: URL_BASE + '/#hermes' });
+await sleep(1500);
+console.log('cold load #hermes:', await evaluate(`JSON.stringify({
+  hash: location.hash,
+  editorOpen: !document.querySelector('[data-js="editor"]').hidden,
+  title: document.querySelector('[data-js="editor-title"]').textContent,
+})`));
+await evaluate(`document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(500);
+console.log('after back:', await evaluate(`JSON.stringify({
+  hash: location.hash,
+  editorOpen: !document.querySelector('[data-js="editor"]').hidden,
+})`));
+
+// Two tools deep, the sidebar's back is still the way out to the picker.
+await evaluate(`document.querySelectorAll('[data-js="tool-picker"] .tool-card')[0].click()`);
+await sleep(1200);
+await evaluate(`document.querySelectorAll('[data-js="tool-picker"] .tool-card')[1].click()`);
+await sleep(1200);
+console.log('two deep:', await evaluate(`JSON.stringify({ hash: location.hash, title: document.querySelector('[data-js="editor-title"]').textContent })`));
+await evaluate(`document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(500);
+console.log('back from two deep:', await evaluate(`JSON.stringify({
+  hash: location.hash,
+  editorOpen: !document.querySelector('[data-js="editor"]').hidden,
+})`));
+await shot(join(OUT, '22-routing.png'), { full: false });
 
 // --- console errors? ---
 const errs = await evaluate(`JSON.stringify(window.__errs||[])`);

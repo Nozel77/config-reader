@@ -1,107 +1,224 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CONFIG READER</title>
-<script>
-  /* Paint the stored theme before CSS loads, so there is no light-flash on a dark choice. */
-  try {
-    var t = localStorage.getItem('theme');
-    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-  } catch (e) {}
-</script>
-<link rel="stylesheet" href="/styles.css">
-<style>
-  /* Subtle radial gradient behind landing — only visible when on the picker. */
-  .onboard-wrap::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background: radial-gradient(ellipse 60% 50% at 50% 30%, var(--accent-soft) 0%, transparent 70%);
-    pointer-events: none;
-    z-index: -1;
-  }
-  body:has(#editor:not([hidden])) .onboard-wrap::before { display: none; }
-</style>
-</head>
-<body>
-<button id="theme" class="theme" type="button" title="Switch to dark mode" aria-label="Switch to dark mode"><svg viewBox="0 0 16 16" aria-hidden="true" class="ic"><path d="M14 9.5A5.5 5.5 0 0 1 6.5 2 5.5 5.5 0 1 0 14 9.5z" fill="currentColor"/></svg></button>
-<div class="onboard-wrap">
-<main class="wrap">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Config Reader: local settings editor for your AI CLI tools</title>
+    <meta
+      name="description"
+      content="Edit the settings files of Claude Code, Codex, OpenCode and Hermes in one page. Point a tool at your own endpoint, pick a model from it, and save. Every other key in the file is left untouched."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f3f4f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a1120" media="(prefers-color-scheme: dark)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Config Reader" />
+    <meta
+      property="og:description"
+      content="Edit the settings files of Claude Code, Codex, OpenCode and Hermes in one page."
+    />
+    <meta property="og:url" content="https://github.com/Nozel77/config-reader" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Cg stroke='%23fff' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M8 11h16M8 16h16M8 21h16'/%3E%3C/g%3E%3Cg fill='%236366f1' stroke='%23fff' stroke-width='2'%3E%3Ccircle cx='19' cy='11' r='3'/%3E%3Ccircle cx='13' cy='16' r='3'/%3E%3Ccircle cx='22' cy='21' r='3'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <script>
+      /* Paint the stored theme before CSS loads, so a dark choice never flashes light. */
+      try {
+        var t = localStorage.getItem("theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- One page, two states: the rail is the page, or the rail is a sidebar. -->
+    <div class="app" data-js="app">
+      <aside class="rail">
+        <header class="rail__head">
+          <div class="rail__top">
+            <h1 class="rail__brand">Config Reader</h1>
+          </div>
+          <p class="rail__lede">
+            Point a tool at your own endpoint. Pick one and its config opens beside it.
+          </p>
+        </header>
 
-  <!-- Landing. Three steps, one action: pick a tool, check the path the scan
-       found, then Scan. Scan looks for the selected tool's config file
-       server-side and, if it finds it, goes straight to the editor. -->
-  <section id="onboard" class="onboard">
-    <h1 class="brand">CONFIG READER</h1>
-    <p class="lede">Point a tool at your own endpoint. Pick one, then scan for its config.</p>
-    <ol class="steps" aria-hidden="true">
-      <li class="step"><span class="stepnum">1</span> Pick a tool</li>
-      <li class="step"><span class="stepnum">2</span> Check the path</li>
-      <li class="step"><span class="stepnum">3</span> Scan</li>
-    </ol>
-    <div id="toolpick" class="toolpick" role="radiogroup" aria-label="Which tool to configure"></div>
-    <p id="scanpath" class="scanpath" hidden>Editing <code id="scantarget"></code></p>
-    <button id="scanbtn" class="scan" type="button">Scan Claude Code</button>
-    <p id="obnote" class="note" role="status" aria-live="polite"></p>
-  </section>
+        <nav class="tool-picker" data-js="tool-picker" aria-label="Which tool to configure"></nav>
+        <p class="note rail__note" data-js="rail-note" role="status" aria-live="polite"></p>
 
-  <!-- Editor. Everything below is filled in from what the scan returned. -->
-  <section id="editor" hidden>
-    <div class="actionbar">
-      <button id="switch" class="ghost" type="button" title="Back to the tool picker">Scan again</button>
-      <span id="dot" class="dot" title="unsaved changes"></span>
-      <code id="path" class="path"></code>
-      <span class="spacer"></span>
-      <button id="reload" class="ghost" type="button" title="Re-read the file, discarding edits">Reload</button>
-      <button id="save" class="primary" type="button" disabled>Save</button>
+        <!-- All the rail's controls in one row: back is the editor's way out, theme and
+             stop are always there, and the repo link belongs to the landing only. -->
+        <footer class="rail__foot">
+          <button
+            class="rail__action rail__back"
+            type="button"
+            data-js="editor-back"
+            title="Back to the tool list"
+            aria-label="Back to the tool list"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon">
+              <path
+                d="M13 8H3.6M8 3.6L3.6 8 8 12.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span class="rail__action-label">Back</span>
+          </button>
+          <button
+            class="rail__action rail__action--theme"
+            type="button"
+            data-js="theme-toggle"
+            title="Switch to dark mode"
+            aria-label="Switch to dark mode"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon">
+              <path d="M14 9.5A5.5 5.5 0 0 1 6.5 2 5.5 5.5 0 1 0 14 9.5z" fill="currentColor" />
+            </svg>
+            <span class="rail__action-label">Theme</span>
+          </button>
+          <a
+            class="rail__action rail__action--repo"
+            href="https://github.com/Nozel77/config-reader"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Nozel77/config-reader on GitHub (opens in a new tab)"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="rail__action-label">Nozel77/config-reader</span>
+          </a>
+          <button
+            class="rail__action"
+            type="button"
+            data-js="stop-server"
+            title="Stop the server"
+            aria-label="Stop the server"
+          >
+            <span class="rail__action-label">Stop</span>
+          </button>
+        </footer>
+      </aside>
+
+      <main class="main">
+        <!-- Filled in from what the scan returned. -->
+        <section class="editor" data-js="editor" hidden>
+          <header class="actionbar" data-js="actionbar">
+            <span
+              class="actionbar__dot"
+              data-js="actionbar-dot"
+              title="Unsaved changes"
+            ></span>
+            <code class="actionbar__path" data-js="actionbar-path"></code>
+            <button
+              class="button button--ghost"
+              type="button"
+              data-js="reload"
+              title="Re-read the file, discarding edits"
+            >
+              Reload
+            </button>
+            <button class="button button--primary" type="button" data-js="save" disabled>Save</button>
+          </header>
+
+          <h2 class="editor__title" data-js="editor-title"></h2>
+          <div class="editor__banners" data-js="editor-banners"></div>
+
+          <form class="field-list" data-js="editor-form" onsubmit="return false;"></form>
+
+          <!-- Claude Code only: env keys this editor has no field for. -->
+          <section class="other-vars" data-js="other-vars" hidden>
+            <h3 class="other-vars__title">
+              Other variables in <code>env</code>
+              <span class="badge other-vars__count" data-js="other-vars-count">0</span>
+            </h3>
+            <div class="other-vars__list" data-js="other-vars-list"></div>
+            <div class="other-vars__add">
+              <input
+                class="other-vars__input"
+                data-js="other-vars-new"
+                placeholder="NEW_VARIABLE_NAME"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="New variable name"
+              />
+              <button class="button button--ghost button--small" type="button" data-js="other-vars-add">
+                Add
+              </button>
+            </div>
+          </section>
+        </section>
+      </main>
     </div>
 
-    <h2 id="title" class="title"></h2>
-    <div id="banners" class="banners"></div>
-    <div id="tabs" class="tabs" role="tablist"></div>
-
-    <div id="paneenv" role="tabpanel" aria-labelledby="tab_paneenv">
-      <form id="form" class="grid" onsubmit="return false"></form>
-
-      <!-- Claude Code only: env keys this editor has no field for. Shown so an
-           unknown variable is never invisible and never silently lost. -->
-      <section id="others" class="others" hidden>
-        <h3 class="otherhead">
-          Other variables in <code>env</code>
-          <span id="othercount" class="badge">0</span>
-        </h3>
-        <div id="otherlist" class="otherlist"></div>
-        <div class="addrow">
-          <input id="newkey" placeholder="NEW_VARIABLE_NAME" spellcheck="false"
-                 autocomplete="off" aria-label="New variable name">
-          <button id="addvar" class="ghost small" type="button">Add</button>
+    <!-- A native <dialog>: top layer, focus trap, Escape and backdrop come free. -->
+    <dialog class="model-picker" data-js="model-picker" aria-labelledby="model-picker-title">
+      <header class="model-picker__head">
+        <div>
+          <h2 class="model-picker__title" id="model-picker-title" data-js="model-picker-title">
+            Pick a model
+          </h2>
+          <p class="model-picker__sub" data-js="model-picker-sub"></p>
         </div>
-      </section>
-    </div>
+        <button
+          class="button button--ghost button--icon"
+          type="button"
+          data-js="model-picker-close"
+          title="Close"
+          aria-label="Close"
+        ></button>
+      </header>
 
-    <div id="panemodels" role="tabpanel" aria-labelledby="tab_panemodels" hidden>
-      <div class="modelbar">
-        <select id="modeltarget" aria-label="Which variable a picked model is written to"></select>
-        <input id="modelfilter" placeholder="Filter models…" spellcheck="false"
-               autocomplete="off" aria-label="Filter models">
-        <label class="check" title="Show only models with a 1M+ context window"><input type="checkbox" id="only1m"> 1M only</label>
-        <label class="check" title="Show only models that accept image input"><input type="checkbox" id="onlyvision"> Vision only</label>
-        <button id="loadmodels" class="primary" type="button">Load models</button>
+      <div class="model-picker__bar">
+        <input
+          class="model-picker__filter"
+          data-js="model-picker-filter"
+          placeholder="Filter by name…"
+          spellcheck="false"
+          autocomplete="off"
+          aria-label="Filter models"
+        />
+        <label class="check" title="Only models with a 1M+ context window">
+          <input class="check__box" type="checkbox" data-js="filter-1m" />
+          1M only
+        </label>
+        <label class="check" title="Only models that accept image input">
+          <input class="check__box" type="checkbox" data-js="filter-vision" />
+          Vision only
+        </label>
+        <button
+          class="button button--ghost button--icon"
+          type="button"
+          data-js="model-picker-reload"
+          title="Read /v1/models again"
+          aria-label="Read the model list again"
+        ></button>
+        <span class="badge model-picker__count" data-js="model-picker-count"></span>
       </div>
-      <p id="modelnote" class="note"></p>
-      <div id="modelempty" class="empty" hidden></div>
-      <div id="modelhead" class="mhead" hidden><span>Model</span><span class="mheadtags">Tags</span><span></span></div>
-      <div id="modellist" class="modellist"></div>
-    </div>
 
-    <!-- "Other variables" section stays at the bottom of the env pane -->
-  </section>
+      <p class="note model-picker__note" data-js="model-picker-note"></p>
+      <div class="model-picker__list" data-js="model-picker-list"></div>
+    </dialog>
 
-</main>
-</div>
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
-<script src="/app.js"></script>
-</body>
+    <button
+      class="to-top"
+      data-js="to-top"
+      type="button"
+      title="Back to top"
+      aria-label="Back to top"
+    ></button>
+
+    <!-- A popover, so it can be seen over an open modal dialog: a modal lives in the top
+         layer, where no z-index reaches. -->
+    <div class="toast" data-js="toast" popover="manual" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
 </html>

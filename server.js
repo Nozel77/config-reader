@@ -2,11 +2,17 @@
 //   node server.js [--port 8787] [--open] [--selftest]
 'use strict';
 
-// Needs Node 22+: stripTypeScriptTypes, global fetch, AbortSignal.timeout.
-// Fail with a sentence instead of a stack trace on an older runtime.
-const [NODE_MAJOR] = process.versions.node.split('.').map(Number);
-if (NODE_MAJOR < 22) {
-  console.error(`CONFIG READER needs Node.js 22 or newer (running ${process.versions.node}).`);
+// Needs Node 22.13+ — the release stripTypeScriptTypes actually landed in (v22.13.0,
+// and v23.2.0 on the odd line). A bare major check waves 22.0-22.12 through, and the
+// failure then surfaces as a dead page rather than a sentence, so the check asks for
+// the functions themselves instead of parsing a version number.
+const { stripTypeScriptTypes } = require('node:module');
+const missing = typeof stripTypeScriptTypes !== 'function' ? 'stripTypeScriptTypes'
+  : typeof fetch !== 'function' ? 'fetch'
+  : typeof globalThis.AbortSignal?.timeout !== 'function' ? 'AbortSignal.timeout'
+  : null;
+if (missing) {
+  console.error(`CONFIG READER needs Node.js 22.13 or newer — no ${missing} here (running ${process.versions.node}).`);
   process.exit(1);
 }
 const http = require('node:http');
@@ -14,8 +20,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
-const { stripTypeScriptTypes } = require('node:module');
-
 const HERE = __dirname;
 const INDEX = path.join(HERE, 'index.html');
 const APP_TS = path.join(HERE, 'app.ts');
@@ -23,6 +27,26 @@ const ICONS = path.join(HERE, 'icons');
 
 // CLAUDE_CONFIG_DIR overrides ~/.claude entirely. Check it before homedir().
 const configDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+
+// Hermes follows the same rule with its own variable. The Hermes installer sets
+// HERMES_HOME (AppData\Local\hermes on Windows) and the agent reads that directory,
+// so ~/.hermes can be an empty leftover — editing it would write a config nothing
+// opens. ponytail: the default profile only; a named profile lives under
+// <HERMES_HOME>/profiles/<name> and is not guessed at.
+const hermesHome = () => process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
+
+// Codex: CODEX_HOME or ~/.codex. It has no XDG fallback, so there is no second
+// candidate to guess at. Checked because a CODEX_HOME install otherwise gets its
+// config written to a ~/.codex the CLI never reads.
+const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+
+// OpenCode follows the XDG base-directory spec on Linux and macOS, but on Windows
+// it uses %USERPROFILE%\.config — XDG_CONFIG_HOME is not honoured there. Both
+// rules are opencode's own; this only mirrors them.
+const opencodeDir = () => {
+  const xdg = process.platform === 'win32' ? '' : process.env.XDG_CONFIG_HOME;
+  return path.join(xdg || path.join(os.homedir(), '.config'), 'opencode');
+};
 
 const MAX_BODY = 5 * 1024 * 1024;
 
@@ -63,22 +87,49 @@ const settingsFile = () => path.join(configDir(), 'settings.json');
 // `mode` is the whole difference. 'env' round-trips the parsed document; 'simple'
 // patches only the keys below and leaves every other byte of the file alone.
 const TOOLS = [
-  { id: 'claude', name: 'Claude Code', mode: 'env' },
-  { id: 'codex', name: 'Codex', mode: 'simple' },
-  { id: 'opencode', name: 'OpenCode', mode: 'simple' },
-  { id: 'hermes', name: 'Hermes Agent', mode: 'simple' },
+  { id: 'claude', name: 'Claude Code', mode: 'env', bin: 'claude' },
+  { id: 'codex', name: 'Codex', mode: 'simple', bin: 'codex' },
+  { id: 'opencode', name: 'OpenCode', mode: 'simple', bin: 'opencode' },
+  { id: 'hermes', name: 'Hermes Agent', mode: 'simple', bin: 'hermes' },
 ];
 
 const toolById = id => TOOLS.find(t => t.id === id) || null;
 
+// Is the CLI itself on PATH? A directory walk, not a spawned `which`/`where`. The
+// two were compared on this machine's four tools before choosing, and agreed on
+// every case including a synthetic binary in a scratch dir — the walk is the same
+// answer for 5x less time and no shell. The exec bit is checked so a non-executable
+// file of the right name does not count as installed, which is what `which` does too.
+// ponytail: misses shell aliases and bash functions. Spawn `which` if a tool ever
+// ships that way.
+function hasBin(name) {
+  const exts = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')].filter(Boolean)
+    : [''];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      try {
+        const st = fs.statSync(path.join(dir, name + ext));
+        if (st.isFile() && (process.platform === 'win32' || (st.mode & 0o111))) return true;
+      } catch { /* not in this directory */ }
+    }
+  }
+  return false;
+}
+
+// The registry as the page sees it: the tool list plus whether the CLI is actually
+// on this machine. Computed per request rather than cached — it is two calls a
+// session, and a cache would go stale the moment someone installs a tool.
+const toolList = () => TOOLS.map(t => ({ ...t, installed: hasBin(t.bin) }));
+
 // Every path is derived here, server-side. The browser names a tool and never a
 // file, so there is still no path arriving from the client to validate or traverse.
 function toolPaths(id) {
-  const home = os.homedir();
   if (id === 'claude') return { file: path.join(configDir(), 'settings.json') };
-  if (id === 'codex') return { file: path.join(home, '.codex', 'config.toml') };
-  if (id === 'opencode') return { file: path.join(home, '.config', 'opencode', 'opencode.json') };
-  if (id === 'hermes') return { file: path.join(home, '.hermes', 'config.yaml'), envFile: path.join(home, '.hermes', '.env') };
+  if (id === 'codex') return { file: path.join(codexHome(), 'config.toml') };
+  if (id === 'opencode') return { file: path.join(opencodeDir(), 'opencode.json') };
+  if (id === 'hermes') return { file: path.join(hermesHome(), 'config.yaml'), envFile: path.join(hermesHome(), '.env') };
   throw Object.assign(new Error(`unknown tool: ${id}`), { status: 400 });
 }
 
@@ -108,25 +159,35 @@ function scanInfo(tool) {
 
 // ---------------------------------------------------------------- read / write
 
+// A BOM is not part of the JSON, but Notepad and a few Windows editors write one.
+// Stripping it here means the file parses, the editor can edit it, and the BOM is put
+// back on write — otherwise a valid file would be reported as broken and refuse to
+// save. Kept separate from `raw` so the round-trip comparison stays honest.
+function stripBom(text) {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 function readSettings(file) {
   let raw = null;
   try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
   if (raw === null) {
-    return { file, exists: false, raw: '', parsed: {}, eol: '\n', mtimeMs: 0, normalized: false, parseError: null };
+    return { file, exists: false, raw: '', parsed: {}, eol: '\n', mtimeMs: 0, normalized: false, parseError: null, bom: false };
   }
 
   const st = fs.statSync(file);
   const eol = detectEol(raw);
+  const bom = raw.charCodeAt(0) === 0xfeff;
+  const body = bom ? raw.slice(1) : raw;
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(body);
     // Round-trip is semantic, not byte-level. If re-serialising would change the
     // file, say so — a silent reformat beats a silent key drop, but visible beats both.
     const canonical = JSON.stringify(parsed, null, 2).replace(/\n/g, eol) + eol;
-    return { file, exists: true, raw, parsed, eol, mtimeMs: st.mtimeMs, normalized: canonical !== raw, parseError: null };
+    return { file, exists: true, raw, parsed, eol, mtimeMs: st.mtimeMs, normalized: canonical !== body, parseError: null, bom };
   } catch (e) {
     // Broken file is a supported state: hand back the raw text so the UI can say so.
-    return { file, exists: true, raw, parsed: null, eol, mtimeMs: st.mtimeMs, normalized: false, parseError: e.message };
+    return { file, exists: true, raw, parsed: null, eol, mtimeMs: st.mtimeMs, normalized: false, parseError: e.message, bom };
   }
 }
 
@@ -184,7 +245,7 @@ function atomicWrite(file, text) {
 // ------------------------------------------------------- simple-mode formats
 
 function readText(file) {
-  try { return fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  try { return stripBom(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
 
 // The three tools below each own a config format with a real parser (TOML, YAML,
@@ -269,15 +330,42 @@ function tomlSetSection(text, section, body) {
   return `${head ? `${head}\n\n` : ''}${body.replace(/\s*$/, '')}\n${tail ? `\n${tail}` : ''}`;
 }
 
+// Set one key inside a section, creating the section when the file has none. Unlike
+// tomlSetSection this keeps the section's other keys: [agents] holds settings this
+// editor has no field for.
+function tomlSetInSection(text, section, key, value) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex(l => new RegExp(`^\\s*\\[${section}\\]`).test(l));
+  if (start === -1) return tomlSetSection(text, section, `[${section}]\n${key} = ${tomlString(value)}`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) if (/^\s*\[/.test(lines[i])) { end = i; break; }
+  const re = new RegExp(`^\\s*${key}\\s*=`);
+  const at = lines.findIndex((l, i) => i > start && i < end && re.test(l));
+  if (at === -1) lines.splice(end, 0, `${key} = ${tomlString(value)}`);
+  else lines[at] = `${key} = ${tomlString(value)}`;
+  return lines.join('\n');
+}
+
 // Codex CLI: ~/.codex/config.toml. The key travels in the provider block, because
-// a custom provider ignores auth.json — a key placed there is simply not read.
+// a custom provider ignores auth.json — and as a static Authorization header, which
+// is the form Codex documents; experimental_bearer_token is only read for configs
+// another tool wrote that way.
+function codexKey(src) {
+  const hdr = tomlSectionValues(src, `model_providers.${PROVIDER}.http_headers`);
+  const auth = hdr.Authorization || hdr.authorization || '';
+  if (auth) return auth.replace(/^Bearer\s+/i, '');
+  const prov = tomlSectionValues(src, `model_providers.${PROVIDER}`);
+  return prov.experimental_bearer_token || prov.api_key || '';
+}
+
 function codexRead(text) {
   const src = text || '';
   const prov = tomlSectionValues(src, `model_providers.${PROVIDER}`);
   return {
     baseUrl: prov.base_url || '',
-    apiKey: prov.experimental_bearer_token || prov.api_key || '',
+    apiKey: codexKey(src),
     model: tomlTopValue(src, 'model'),
+    subagentModel: tomlSectionValues(src, 'agents').default_subagent_model || '',
   };
 }
 
@@ -285,14 +373,19 @@ function codexWrite(text, v) {
   let out = text || '';
   out = tomlSetTop(out, 'model_provider', PROVIDER);
   if (v.model) out = tomlSetTop(out, 'model', v.model);
+  if (v.subagentModel) out = tomlSetInSection(out, 'agents', 'default_subagent_model', v.subagentModel);
   const lines = [
     `[model_providers.${PROVIDER}]`,
     `name = ${tomlString(PROVIDER_LABEL)}`,
     `base_url = ${tomlString(withV1(v.baseUrl))}`,
     'wire_api = "responses"',
   ];
-  if (v.apiKey) lines.push(`experimental_bearer_token = ${tomlString(v.apiKey)}`);
-  return tomlSetSection(out, `model_providers.${PROVIDER}`, lines.join('\n'));
+  out = tomlSetSection(out, `model_providers.${PROVIDER}`, lines.join('\n'));
+  if (v.apiKey) {
+    out = tomlSetSection(out, `model_providers.${PROVIDER}.http_headers`,
+      `[model_providers.${PROVIDER}.http_headers]\nAuthorization = ${tomlString(`Bearer ${v.apiKey}`)}`);
+  }
+  return out;
 }
 
 // OpenCode: ~/.config/opencode/opencode.json. JSONC in the wild, so trailing
@@ -303,11 +396,18 @@ function jsoncParse(text) {
 
 function opencodeRead(text) {
   let cfg;
-  try { cfg = jsoncParse(text || '{}'); } catch { return { baseUrl: '', apiKey: '', model: '', broken: true }; }
+  try { cfg = jsoncParse(text || '{}'); } catch { return { baseUrl: '', apiKey: '', model: '', subagentModel: '', broken: true }; }
   const p = cfg?.provider?.[PROVIDER];
   const model = typeof cfg?.model === 'string' && cfg.model.startsWith(`${PROVIDER}/`)
     ? cfg.model.slice(PROVIDER.length + 1) : '';
-  return { baseUrl: p?.options?.baseURL || '', apiKey: p?.options?.apiKey || '', model };
+  const sub = cfg?.agent?.explorer?.model;
+  return {
+    baseUrl: p?.options?.baseURL || '',
+    apiKey: p?.options?.apiKey || '',
+    model,
+    subagentModel: typeof sub === 'string' && sub.startsWith(`${PROVIDER}/`)
+      ? sub.slice(PROVIDER.length + 1) : '',
+  };
 }
 
 function opencodeWrite(text, v) {
@@ -321,39 +421,112 @@ function opencodeWrite(text, v) {
   if (v.model) p.models[v.model] = { name: v.model };
   cfg.provider[PROVIDER] = p;
   if (v.model) cfg.model = `${PROVIDER}/${v.model}`;
+  if (v.subagentModel) {
+    if (!cfg.agent || typeof cfg.agent !== 'object') cfg.agent = {};
+    cfg.agent.explorer = {
+      description: 'Fast explorer subagent for codebase exploration',
+      mode: 'subagent',
+      model: `${PROVIDER}/${v.subagentModel}`,
+    };
+  }
   return `${JSON.stringify(cfg, null, 2)}\n`;
 }
 
-// Hermes: ~/.hermes/config.yaml holds a top-level `model:` block, and the key lives
-// in ~/.hermes/.env as OPENAI_API_KEY — the block references it as ${OPENAI_API_KEY}.
+// Hermes: <HERMES_HOME>/config.yaml holds a top-level `model:` block, and the key
+// lives in the .env beside it, referenced from the block as ${OPENAI_API_KEY}.
+// Besides that block Hermes reads a `delegation:` block and one block per role under
+// `auxiliary:` — all four keys of the same shape, so one patcher serves all three.
 const HERMES_MODEL_RE = /^model:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)/m;
+const HERMES_DELEGATION_RE = /^delegation:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)/m;
+const HERMES_AUX_RE = /^auxiliary:[ \t]*\r?\n((?:(?:[ \t]+.*\r?\n?)|(?:[ \t]*\r?\n))*)/m;
+// Role ids are 9router's list; `delegation` is a top-level block, the rest live under
+// `auxiliary:`. The editor offers a field per role and writes only the filled ones.
+const HERMES_ROLES = ['delegation', 'vision', 'web_extract', 'compression', 'title_generation',
+  'approval', 'skills_hub', 'mcp', 'memory_query_rewrite', 'background_review', 'curator', 'monitor'];
+const hermesRoleRe = role =>
+  new RegExp(`^  ${role}:[ \\t]*\\r?\\n(?:(?:[ \\t]{4,}.*\\r?\\n?)|(?:[ \\t]*\\r?\\n))*`, 'm');
 
-function hermesRead(text) {
-  const m = HERMES_MODEL_RE.exec(text || '');
-  if (!m) return { baseUrl: '', apiKey: '', model: '' };
-  const body = m[1] || '';
-  const get = key => {
-    const hit = new RegExp(`^[ \\t]+${key}:[ \\t]*["']?([^"'\\r\\n]+)["']?`, 'm').exec(body);
-    return hit ? hit[1].trim() : '';
-  };
-  return { baseUrl: get('base_url'), apiKey: '', model: get('default') };
+function hermesBlockValue(body, key) {
+  const m = new RegExp(`^[ \\t]+${key}:[ \\t]*["']?([^"'\\r\\n]+)["']?`, 'm').exec(body || '');
+  return m ? m[1].trim() : '';
 }
 
-function hermesWrite(text, v) {
-  const block = `model:\n  default: ${JSON.stringify(v.model)}\n  provider: "custom"\n`
-    + `  base_url: ${JSON.stringify(withV1(v.baseUrl))}\n  api_key: \${OPENAI_API_KEY}\n`;
-  const out = text || '';
-  const m = HERMES_MODEL_RE.exec(out);
-  if (!m) return out.length > 0 ? `${block}\n${out}` : block;
-  // The pattern's trailing blank-line arm is greedy, so it swallows the empty line
-  // that separated the old block from whatever follows. That is still valid YAML,
-  // but it reflows a file this editor does not own — so the separator goes back
-  // whenever there is a next key to separate from.
-  const head = out.slice(0, m.index);
-  const rest = out.slice(m.index + m[0].length);
+function hermesRead(text) {
+  const src = text || '';
+  const out = { baseUrl: '', apiKey: '', model: '' };
+  const m = HERMES_MODEL_RE.exec(src);
+  if (m) {
+    out.baseUrl = hermesBlockValue(m[1], 'base_url');
+    out.model = hermesBlockValue(m[1], 'default');
+  }
+  const d = HERMES_DELEGATION_RE.exec(src);
+  out.delegation = d ? hermesBlockValue(d[1], 'model') : '';
+  const aux = HERMES_AUX_RE.exec(src);
+  for (const role of HERMES_ROLES) {
+    if (role === 'delegation') continue;
+    const r = aux ? new RegExp(`^  ${role}:[ \\t]*\\r?\\n((?:(?:[ \\t]{4,}.*\\r?\\n?)|(?:[ \\t]*\\r?\\n))*)`, 'm').exec(aux[1]) : null;
+    out[role] = r ? hermesBlockValue(r[1], 'model') : '';
+  }
+  return out;
+}
+
+// Patch a Hermes block key by key, never rebuild it: a block in the wild carries keys
+// this editor has no field for — context_length, max_tokens, an api_key line naming the
+// user's own env var — and rebuilding would drop every one of them. Only the model key,
+// base_url, provider and api_key are ours; the last two are only filled in when absent.
+function hermesPatchBlock(body, indent, modelKey, v) {
+  const lines = body.split(/\r?\n/);
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
+  const at = key => lines.findIndex(l => new RegExp(`^\\s+${key}\\s*:`).test(l));
+  const put = (key, line) => {
+    const i = at(key);
+    if (i === -1) lines.push(line); else lines[i] = line;
+  };
+  put(modelKey, `${indent}${modelKey}: ${JSON.stringify(v.model)}`);
+  put('base_url', `${indent}base_url: ${JSON.stringify(withV1(v.baseUrl))}`);
+  // A provider of the user's own (a hand-written `provider: anthropic`) is left alone.
+  if (at('provider') === -1) put('provider', `${indent}provider: "custom"`);
+  if (at('api_key') === -1) put('api_key', `${indent}api_key: \${OPENAI_API_KEY}`);
+  return lines.join('\n');
+}
+
+const hermesBuildBlock = (name, indent, modelKey, v) =>
+  `${name}:\n` + hermesPatchBlock('', indent, modelKey, v) + '\n';
+
+// The model block goes first when the file has none (9router does the same); the other
+// blocks append, which is also what 9router's own writers do.
+function hermesSetTopBlock(text, name, modelKey, v, prepend = false) {
+  const re = name === 'model' ? HERMES_MODEL_RE : HERMES_DELEGATION_RE;
+  const m = re.exec(text);
+  if (!m) return prepend ? `${hermesBuildBlock(name, '  ', modelKey, v)}${text}` : `${text}${hermesBuildBlock(name, '  ', modelKey, v)}`;
+  const block = `${name}:\n${hermesPatchBlock(m[1], '  ', modelKey, v)}\n`;
+  const head = text.slice(0, m.index);
+  const rest = text.slice(m.index + m[0].length);
   return `${head}${block}${rest ? `\n${rest}` : ''}`;
 }
 
+function hermesSetRole(text, role, v) {
+  const aux = HERMES_AUX_RE.exec(text);
+  const block = `  ${role}:\n`
+    + hermesPatchBlock('', '  ', 'model', v).split('\n').map(l => `  ${l}`).join('\n') + '\n';
+  if (!aux) return `${text}${text.length > 0 && !text.endsWith('\n') ? '\n' : ''}auxiliary:\n${block}`;
+  const body = aux[1] || '';
+  const re = hermesRoleRe(role);
+  const next = re.test(body) ? body.replace(re, block) : `${body}${block}`;
+  return text.replace(HERMES_AUX_RE, `auxiliary:\n${next}`);
+}
+
+function hermesWrite(text, v) {
+  const out = text || '';
+  const eol = out.includes('\r\n') ? '\r\n' : '\n';
+  let next = hermesSetTopBlock(out, 'model', 'default', v, true);
+  if (v.delegation) next = hermesSetTopBlock(next, 'delegation', 'model', { model: v.delegation, baseUrl: v.baseUrl });
+  for (const role of HERMES_ROLES) {
+    if (role === 'delegation' || !v[role]) continue;
+    next = hermesSetRole(next, role, { model: v[role], baseUrl: v.baseUrl });
+  }
+  return next;
+}
 // Upsert/remove a single KEY=VALUE line in a .env file.
 function envVarSet(text, key, value) {
   const src = text || '';
@@ -378,13 +551,25 @@ function readSimple(tool, paths) {
 }
 
 function writeSimple(tool, paths, values) {
-  const raw = readText(paths.file) || '';
+  // Read raw, not through readText: the BOM has to be remembered so it can be put
+  // back. readText strips it for the parsers; this funnel owes the file its bytes.
+  let rawFile = '';
+  try { rawFile = fs.readFileSync(paths.file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const bom = rawFile.charCodeAt(0) === 0xfeff;
+  const raw0 = stripBom(rawFile);
+  // The surgery below is line-based and emits LF, so a CRLF config would come back
+  // mixed. Normalise in, restore the file's own ending on the way out — env mode has
+  // done the same per file from the start, and this is the one funnel all three
+  // simple formats pass through.
+  const eol = detectEol(raw0);
+  const raw = eol === '\n' ? raw0 : raw0.split('\r\n').join('\n');
   if (tool.id === 'opencode') {
     try { jsoncParse(raw || '{}'); } catch (e) { throw Object.assign(new Error(`existing opencode.json is not valid JSON: ${e.message}`), { status: 409 }); }
   }
-  const text = tool.id === 'codex' ? codexWrite(raw, values)
+  const out = tool.id === 'codex' ? codexWrite(raw, values)
     : tool.id === 'opencode' ? opencodeWrite(raw, values)
     : hermesWrite(raw, values);
+  const text = (bom ? '\uFEFF' : '') + (eol === '\n' ? out : out.split('\n').join('\r\n'));
   atomicWrite(paths.file, text);
   // Hermes reads its key from .env, and only there. Blank means "leave the key be".
   if (tool.id === 'hermes' && values.apiKey) {
@@ -392,7 +577,6 @@ function writeSimple(tool, paths, values) {
   }
   return text;
 }
-
 // ---------------------------------------------------------------- http helpers
 
 const send = (res, status, body, type = 'application/json; charset=utf-8') => {
@@ -480,6 +664,13 @@ function modelsUrl(base) {
   return new URL(/\/v1\/?$/.test(u.pathname) ? 'models' : 'v1/models', root);
 }
 
+// Same rule as modelsUrl, for the one-line completion a health check sends.
+function chatUrl(base) {
+  const root = base.endsWith('/') ? base : `${base}/`;
+  const u = new URL(root);
+  return new URL(/\/v1\/?$/.test(u.pathname) ? 'chat/completions' : 'v1/chat/completions', root);
+}
+
 // Quote a value as a PowerShell single-quoted string. Single quotes are literal
 // in PowerShell, so doubling any embedded quote is the whole escaping rule — a
 // path with an apostrophe (C:\Users\O'Brien) would otherwise break the command.
@@ -500,13 +691,23 @@ function vbsLauncher(port) {
     'Option Explicit',
     "' CONFIG READER - starts the server hidden, then opens the browser.",
     "' Run it again while the editor is open and it just opens the tab.",
-    'Dim sh, fso, here, node',
+    'Dim sh, fso, here, node, msg',
     'Set sh = CreateObject("WScript.Shell")',
     'Set fso = CreateObject("Scripting.FileSystemObject")',
     'here = fso.GetParentFolderName(WScript.ScriptFullName)',
     'node = "node.exe"',
     'If fso.FileExists(sh.ExpandEnvironmentStrings("%ProgramFiles%") & "\\nodejs\\node.exe") Then',
     '  node = sh.ExpandEnvironmentStrings("%ProgramFiles%") & "\\nodejs\\node.exe"',
+    'End If',
+    // A shortcut that dies silently is the worst version of this: say what is wrong.
+    'If node = "node.exe" Then',
+    '  If sh.Run("cmd /c where node", 0, True) <> 0 Then',
+    '    msg = "CONFIG READER needs Node.js 22.13 or newer, and node was not found." & vbCrLf & vbCrLf',
+    '    msg = msg & "Install it from https://nodejs.org/ (the LTS installer is fine), " & vbCrLf',
+    '    msg = msg & "then double-click this shortcut again."',
+    '    MsgBox msg, 16, "CONFIG READER"',
+    '    WScript.Quit 1',
+    '  End If',
     'End If',
     `sh.CurrentDirectory = here`,
     // One wrapping pair of quotes around each path, and no quotes stored in the
@@ -539,6 +740,12 @@ function installShortcutWindows(dir, port, name, vbs) {
   return lnk;
 }
 
+// The Exec key is not a shell line. The desktop spec quotes an argument with " and
+// escapes \ " ` and $ with a backslash, so a path with a space or a $ in it is
+// otherwise split into separate arguments and the launcher quietly does nothing.
+const execQuote = s => '"' + String(s).replace(/([\\"`$])/g, '\\$1') + '"';
+const shQuote = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
 // A .desktop file is the Linux equivalent and needs no COM. `chmod +x` plus
 // gio's trusted flag is what stops the desktop from opening it in a text editor.
 function installShortcutLinux(dir, port, name) {
@@ -549,7 +756,7 @@ function installShortcutLinux(dir, port, name) {
     'Type=Application',
     'Name=CONFIG READER',
     'Comment=Edit the env block of ~/.claude/settings.json',
-    `Exec=node ${path.join(HERE, 'server.js')} --port ${port} --open`,
+    `Exec=node ${execQuote(path.join(HERE, 'server.js'))} --port ${port} --open`,
     `Path=${HERE}`,
     'Terminal=false',
     'Icon=utilities-terminal',
@@ -562,6 +769,16 @@ function installShortcutLinux(dir, port, name) {
   return file;
 }
 
+// macOS has neither .lnk nor .desktop, but a .command file is the native equivalent:
+// Finder opens it in Terminal and runs it, so a double-click is all it takes. An .app
+// bundle would buy an icon and nothing else this tool needs.
+function installShortcutMac(dir, port, name) {
+  const file = path.join(dir, `${name}.command`);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, `#!/bin/sh\ncd ${shQuote(HERE)}\nexec node ./server.js --port ${port} --open\n`);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
 // --dir, or null for "use the platform default". A relative path is relative to
 // the editor's folder, so `--dir .` and a USB path both behave predictably.
 const resolveDirArg = raw => (raw ? path.resolve(HERE, raw) : null);
@@ -587,9 +804,9 @@ function desktopDirWin() {
 }
 
 // Where the shortcut goes. Windows gets a desktop .lnk; Linux gets the .desktop
-// file in the applications dir. macOS would need an .app bundle, so it is told
-// so rather than given a broken file. No home directory anywhere -> the launcher
-// is still written, and the user is told where it is.
+// file in the applications dir; macOS gets a double-clickable .command in
+// ~/Applications. A platform with none of those still gets the launcher file, and
+// the caller is told where it landed rather than being handed a broken shortcut.
 function installShortcut(port, name = 'CONFIG READER', dirOverride = null) {
   const vbs = path.join(HERE, 'launch.vbs');
   let dir = null, file = null, note = '';
@@ -605,24 +822,40 @@ function installShortcut(port, name = 'CONFIG READER', dirOverride = null) {
     dir = dirOverride || path.join(os.homedir(), '.local', 'share', 'applications');
     file = installShortcutLinux(dir, port, name);
     note = 'also available from the application menu';
+  } else if (process.platform === 'darwin') {
+    // ~/Applications needs no admin rights and Spotlight indexes it. A bare home
+    // directory (some CI images) still gets the file, just with no note to explain it.
+    dir = dirOverride || path.join(os.homedir(), 'Applications');
+    file = installShortcutMac(dir, port, name);
+    note = 'double-click it in Finder; if macOS blocks it, right-click → Open once';
   } else {
-    note = 'macOS needs an .app bundle; not written. The launcher is at ' + vbs;
+    note = `no shortcut installer for ${process.platform} — the launcher is at ${vbs}`;
   }
   return { file: file || vbs, dir, vbs, note };
 }
+// A positive number from whatever the endpoint sent, or undefined. One reader for
+// every numeric field below: they arrive as numbers or numeric strings, and a
+// missing or zero limit is not a limit worth showing.
+const num = v => {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+};
 
 // The context window each model advertises, by id. Claude Code assumes 200K unless
 // the model name carries a trailing [1m], so the editor needs this to decide whether
-// to add that marker on assign. Two shapes are in the wild — a flat context_length
-// and a nested capabilities.contextWindow — and some entries carry neither, which is
-// why a missing window is left out rather than guessed at.
+// to add that marker on assign. Four shapes are in the wild — a flat context_length,
+// a nested capabilities.contextWindow, Anthropic's max_input_tokens, and
+// models.dev/OpenRouter's limit.context / top_provider.context_length — and some
+// entries carry none, which is why a missing window is left out rather than guessed at.
 function modelWindows(rows) {
   const out = {};
   for (const m of rows) {
     if (!m || typeof m !== 'object') continue;
     const id = m.id || m.name || m.model;
-    const w = m.context_length || (m.capabilities && m.capabilities.contextWindow);
-    if (typeof id === 'string' && id && Number.isFinite(w) && w > 0) out[id] = w;
+    const w = num(m.context_length) ?? num(m.max_input_tokens)
+      ?? num(m.capabilities && m.capabilities.contextWindow)
+      ?? num(m.limit && m.limit.context) ?? num(m.top_provider && m.top_provider.context_length);
+    if (typeof id === 'string' && id && w) out[id] = w;
   }
   return out;
 }
@@ -636,14 +869,22 @@ function modelWindows(rows) {
 //   a modality string ("text+image->text" in architecture.modality).
 const VISION_TRUE_TOKENS = new Set(['image', 'images', 'vision', 'visual']);
 
-// A modality value (array or string) as true/false/undefined. Names an image
+// A modality value as true/false/undefined. Accepts the three shapes gateways use:
+// an array (["text","image"]), a "+"-joined string ("text+image->text" in
+// OpenRouter's architecture.modality), and an object naming its input side
+// ({"input":["text","image"]} — kenari, HF router, models.dev). Names an image
 // modality -> vision; a non-empty value naming none -> text-only. Anything else
 // (absent, empty, non-strings) is unknown, not a no.
 function visionFromModalities(v) {
-  const toks = Array.isArray(v)
-    ? v.filter(x => typeof x === 'string').map(x => x.toLowerCase())
-    : typeof v === 'string' && v
-      ? v.toLowerCase().split(/[^a-z]+/).filter(Boolean)
+  // Only the input side counts: an output image modality is image generation, not
+  // the ability to read a picture.
+  const side = v && typeof v === 'object' && !Array.isArray(v)
+    ? (v.input ?? v.input_modalities)
+    : v;
+  const toks = Array.isArray(side)
+    ? side.filter(x => typeof x === 'string').map(x => x.toLowerCase())
+    : typeof side === 'string' && side
+      ? side.toLowerCase().split(/[^a-z]+/).filter(Boolean)
       : [];
   if (!toks.length) return undefined;
   return toks.some(t => VISION_TRUE_TOKENS.has(t));
@@ -659,7 +900,10 @@ function rowVision(m) {
   const scopes = [m, m.capabilities, m.architecture, m.info].filter(s => s && typeof s === 'object');
   for (const s of scopes) {
     for (const k of VISION_BOOL_KEYS) {
-      if (typeof s[k] === 'boolean') return s[k];
+      const v = s[k];
+      if (typeof v === 'boolean') return v;
+      // Anthropic reports these as { supported: true } rather than a bare flag.
+      if (v && typeof v === 'object' && typeof v.supported === 'boolean') return v.supported;
     }
   }
   for (const s of scopes) {
@@ -684,456 +928,67 @@ function modelVision(rows) {
   return out;
 }
 
-// ------------------------------------------------------------------- selftest
+// A string, or '' — every optional string on a model row is read the same way.
+const str = v => (typeof v === 'string' ? v : '');
 
-function selftest() {
-  const checks = [];
-  const ok = (name, pass, detail = '') => checks.push({ name, pass, detail });
-
-  // 1. round-trip the real file, if there is one
-  const target = toolPaths('claude').file;
-  const s = readSettings(target);
-  if (s.exists && !s.parseError) {
-    const again = JSON.parse(JSON.stringify(s.parsed, null, 2));
-    ok('round-trip deep-equal', JSON.stringify(again) === JSON.stringify(s.parsed));
-    ok('key order preserved', Object.keys(again).join() === Object.keys(s.parsed).join());
-  } else {
-    ok('round-trip deep-equal', true, 'no settings.json on this machine — skipped');
-  }
-
-  // 2. an unknown key must survive a round-trip. This is requirement #1.
-  const probe = { ...(s.parsed || {}), __probe: { a: 1, nested: [1, 'x'] } };
-  const back = JSON.parse(JSON.stringify(probe, null, 2));
-  ok('unknown key survives', JSON.stringify(back.__probe) === JSON.stringify({ a: 1, nested: [1, 'x'] }));
-
-  // 3. atomic write leaves no .tmp behind
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-'));
-  const probeFile = path.join(dir, 'probe.json');
-  atomicWrite(probeFile, '{"ok":true}');
-  const leftovers = fs.readdirSync(dir).filter(f => f.endsWith('.tmp'));
-  ok('atomic write, no .tmp left', leftovers.length === 0 && fs.readFileSync(probeFile, 'utf8') === '{"ok":true}', leftovers.join());
-  fs.rmSync(dir, { recursive: true, force: true });
-
-  // 4. CLAUDE_CONFIG_DIR is honoured
-  const saved = process.env.CLAUDE_CONFIG_DIR;
-  const fakeDir = path.join(os.tmpdir(), 'csui-cfg');
-  process.env.CLAUDE_CONFIG_DIR = fakeDir;
-  const after = configDir();
-  if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
-  ok('CLAUDE_CONFIG_DIR honoured', after === fakeDir && configDir() === (saved || path.join(os.homedir(), '.claude')));
-
-  // 4b. the scan finds ~/.claude/settings.json on all three platforms. Two things
-  // make that work, and each is checked separately because they fail differently:
-  //   (a) os.homedir() reads the env var that platform actually uses
-  //   (b) path.join picks the host separator, so the path is well-formed per OS
-  // (b) cannot be simulated on Windows with the host `path` module — path.join is
-  // host-flavoured by design — so it is checked against each platform's own flavour.
-  const savedHome = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
-  const savedCfg = process.env.CLAUDE_CONFIG_DIR;
-  const homeVar = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
-
-  // (a) the real os.homedir(), on this machine, follows this platform's variable
-  delete process.env.CLAUDE_CONFIG_DIR;
-  process.env[homeVar] = process.platform === 'win32' ? 'C:\\fake\\win' : '/fake/posix';
-  ok(`${process.platform}: os.homedir() follows ${homeVar}`, os.homedir() === process.env[homeVar], os.homedir());
-  ok(`${process.platform}: settingsFile() lands in that home`,
-    toolPaths('claude').file === path.join(process.env[homeVar], '.claude', 'settings.json'), toolPaths('claude').file);
-
-  // (b) the composition is well-formed under every platform's separator rules
-  for (const [plat, flavour, fakeHome, expected] of [
-    ['win32', path.win32, 'C:\\Users\\nozell', 'C:\\Users\\nozell\\.claude\\settings.json'],
-    ['darwin', path.posix, '/Users/nozell', '/Users/nozell/.claude/settings.json'],
-    ['linux', path.posix, '/home/nozell', '/home/nozell/.claude/settings.json'],
-  ]) {
-    const composed = flavour.join(fakeHome, '.claude', 'settings.json');
-    ok(`${plat}: path composes as ${expected}`, composed === expected, composed);
-    ok(`${plat}: composed path is absolute`, flavour.isAbsolute(composed), composed);
-  }
-
-  // CLAUDE_CONFIG_DIR wins over the home dir on every platform.
-  process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'csui-elsewhere');
-  const overridden = toolPaths('claude').file;
-  ok('CLAUDE_CONFIG_DIR overrides home everywhere',
-    overridden === path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'), overridden);
-  if (savedCfg === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = savedCfg;
-  for (const [k, v] of Object.entries(savedHome)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  ok('home env restored after the simulation',
-    (savedHome[homeVar] || '') === (process.env[homeVar] || ''), `${homeVar}=${process.env[homeVar]}`);
-
-  // 4c. nothing platform-specific is hardcoded in the path logic. A Windows-only
-  // string here would silently break macOS and Linux. Only the runtime half of the
-  // file is scanned — this selftest legitimately contains platform literals.
-  const src = fs.readFileSync(__filename, 'utf8');
-  const runtime = src.slice(0, src.indexOf('function selftest'));
-  const pathLines = runtime.split('\n').filter(l => /toolPaths|configDir\s*=/.test(l) && !l.trim().startsWith('//'));
-  ok('no hardcoded Windows path in the settings path logic',
-    !pathLines.some(l => /ProgramData|AppData|[A-Z]:\\/.test(l)), `${pathLines.length} lines checked`);
-
-  // 5. app.ts strips to something the browser can actually parse
-  try {
-    const js = appJs();
-    new Function(js);
-    ok('app.ts strips to valid JS', js.length > 1000, `${js.length} bytes`);
-    ok('types are gone from the output', !/\binterface Field\b/.test(js));
-  } catch (e) {
-    ok('app.ts strips to valid JS', false, e.message);
-  }
-
-  // 6. EOL is detected per file, not assumed from the platform. Claude Code writes
-  // LF even on Windows; assuming CRLF there would reformat every save.
-  ok('detectEol LF', detectEol('{\n  "a": 1\n}\n') === '\n');
-  ok('detectEol CRLF', detectEol('{\r\n  "a": 1\r\n}\r\n') === '\r\n');
-
-  // 7. a real file survives a load -> write -> load cycle byte-for-byte
-  if (s.exists && !s.parseError) {
-    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-rt-'));
-    const rt = path.join(dir2, 'settings.json');
-    fs.writeFileSync(rt, s.raw);
-    const before = fs.readFileSync(rt, 'utf8');
-    atomicWrite(rt, JSON.stringify(JSON.parse(before), null, 2).replace(/\n/g, detectEol(before)) + detectEol(before));
-    const after = fs.readFileSync(rt, 'utf8');
-    ok('real file byte-identical after rewrite', before === after, before === after ? '' : `${before.length} -> ${after.length} bytes`);
-    fs.rmSync(dir2, { recursive: true, force: true });
-  }
-
-  // 8. the scan reports the one file and whether it is there. There is no path
-  // input to validate any more — the browser never names a file.
-  const scan = scanInfo(toolById('claude'));
-  ok('scan names an absolute settings path', path.isAbsolute(scan.file), scan.file);
-  ok('scan path is the config dir settings.json', scan.file === path.join(configDir(), 'settings.json'));
-  ok('scan reports existence as a boolean', typeof scan.found === 'boolean');
-  ok('scan found agrees with the filesystem', scan.found === fs.existsSync(scan.file));
-  ok('scan reports home for path shortening', scan.home === os.homedir());
-
-  // 8b. every tool resolves to a path under the user's home, and no two tools share
-  // one. A registry entry that named the wrong file would silently edit the wrong
-  // config, so the shape is checked rather than each path by hand.
-  ok('every tool has a path', TOOLS.every(t => {
-    try { return path.isAbsolute(toolPaths(t.id).file); } catch { return false; }
-  }), TOOLS.map(t => toolPaths(t.id).file).join(' | '));
-  ok('tool paths are all distinct', new Set(TOOLS.map(t => toolPaths(t.id).file)).size === TOOLS.length);
-  // Case is folded only for this comparison: the paths all come from os.homedir(),
-  // so they agree on case by construction and the check is about containment.
-  ok('every tool path sits under the home dir',
-    TOOLS.every(t => toolPaths(t.id).file.toLowerCase().startsWith(os.homedir().toLowerCase())),
-    TOOLS.map(t => toolPaths(t.id).file).join(' | '));
-  ok('an unknown tool is refused', (() => { try { toolPaths('nope'); return false; } catch { return true; } })());
-  ok('claude is the full env editor, the rest are simple',
-    toolById('claude').mode === 'env' && TOOLS.filter(t => t.mode === 'simple').length === 3,
-    TOOLS.map(t => `${t.id}:${t.mode}`).join());
-  // The picker draws /icon/<id>.png for every tool, so a missing file is a broken
-  // card. Checked here rather than at request time, which would only 404 in a browser.
-  ok('every tool has an icon', TOOLS.every(t => fs.existsSync(path.join(ICONS, `${t.id}.png`))),
-    TOOLS.map(t => `${t.id}:${fs.existsSync(path.join(ICONS, `${t.id}.png`))}`).join(' '));
-
-  // 9. the /v1/models URL is composed from the base, and a base that already ends
-  // in /v1 must not grow a second one. This is the one bit of the model-list
-  // feature that is pure logic, so it is the one bit worth a check.
-  for (const [base, expected] of [
-    ['http://localhost:20128', 'http://localhost:20128/v1/models'],
-    ['http://localhost:20128/', 'http://localhost:20128/v1/models'],
-    ['http://localhost:20128/v1', 'http://localhost:20128/v1/models'],
-    ['http://localhost:20128/v1/', 'http://localhost:20128/v1/models'],
-    ['https://api.anthropic.com', 'https://api.anthropic.com/v1/models'],
-    ['http://host/openai/v1', 'http://host/openai/v1/models'],
-  ]) {
-    let got = '';
-    try { got = modelsUrl(base).href; } catch (e) { got = e.message; }
-    ok(`models URL for ${base}`, got === expected, got);
-  }
-  // The other three tools speak the OpenAI shape, but the rule is the same one: the
-  // list sits at <base>/v1/models whether or not the base already carried the /v1.
-  for (const [base, expected] of [
-    ['http://localhost:20128', 'http://localhost:20128/v1/models'],
-    ['http://localhost:20128/v1', 'http://localhost:20128/v1/models'],
-    ['https://api.openai.com/v1', 'https://api.openai.com/v1/models'],
-    ['https://api.openai.com/v1/', 'https://api.openai.com/v1/models'],
-  ]) {
-    let got = '';
-    try { got = modelsUrl(base).href; } catch (e) { got = e.message; }
-    ok(`openai-shape models URL for ${base}`, got === expected, got);
-  }
-  let threw = false;
-  try { modelsUrl('not a url'); } catch { threw = true; }
-  ok('a non-URL base throws instead of fetching', threw);
-
-  // 9b. the context window each model advertises. The editor turns this into the
-  // [1m] suffix Claude Code needs, so reading it wrong means telling Claude Code a
-  // model has a 1M window when it does not — or missing one that does.
-  const probeRows = [
-    { id: 'flat', context_length: 1000000 },
-    { id: 'nested', capabilities: { contextWindow: 200000 } },
-    { id: 'both', context_length: 1000000, capabilities: { contextWindow: 200000 } },
-    { id: 'neither' },
-    { id: 'byname', name: 'named-model', context_length: 262144 },
-    { name: 'name-only', context_length: 500000 },
-    { id: 'zero', context_length: 0 },
-    { id: 'junk', context_length: 'lots' },
-    null,
-    'a bare string row',
-  ];
-  const wins = modelWindows(probeRows);
-  ok('a flat context_length is read', wins.flat === 1000000, String(wins.flat));
-  ok('a nested capabilities.contextWindow is read', wins.nested === 200000, String(wins.nested));
-  ok('context_length wins when both are present', wins.both === 1000000, String(wins.both));
-  ok('a model with no window is left out, not guessed', !('neither' in wins));
-  ok('id wins over name when both are present', wins.byname === 262144, String(wins.byname));
-  ok('a row with only a name still contributes', wins['name-only'] === 500000, String(wins['name-only']));
-  ok('a row with no usable id is skipped', Object.keys(wins).length === 5, Object.keys(wins).join());
-  ok('a zero window is not recorded', !('zero' in wins));
-  ok('a non-numeric window is not recorded', !('junk' in wins));
-  ok('null and string rows are skipped without throwing', !('null' in wins));
-
-  // 9c. vision support per model. Same honesty rule as windows: only an explicit
-  // capability field counts — a missing signal is left out rather than guessed,
-  // so the card shows no vision badge for it instead of a wrong one.
-  const visionRows = [
-    { id: 'flag', vision: true },
-    { id: 'noflag', vision: false },
-    { id: 'alt', supports_vision: true },
-    { id: 'cap', capabilities: { vision: true } },
-    { id: 'arch', architecture: { input_modalities: ['text', 'image'] } },
-    { id: 'str', architecture: { modality: 'text+image->text' } },
-    { id: 'textonly', modalities: ['text'] },
-    { id: 'empty', modalities: [] },
-    { id: 'neither' },
-    { id: 'junk', vision: 'yes' },
-    null,
-  ];
-  const vis = modelVision(visionRows);
-  ok('a vision flag is read', vis.flag === true, String(vis.flag));
-  ok('an explicit false is kept, not dropped', vis.noflag === false, String(vis.noflag));
-  ok('an alternate flag key is read', vis.alt === true, String(vis.alt));
-  ok('a nested capabilities flag is read', vis.cap === true, String(vis.cap));
-  ok('a modality list naming image is vision', vis.arch === true, String(vis.arch));
-  ok('a modality string naming image is vision', vis.str === true, String(vis.str));
-  ok('a text-only modality list is not vision', vis.textonly === false, String(vis.textonly));
-  ok('an empty modality list is unknown, not a no', !('empty' in vis));
-  ok('a model with no signal is left out, not guessed', !('neither' in vis));
-  ok('a non-boolean flag is not recorded', !('junk' in vis));
-  ok('vision map holds exactly the explicit reports', Object.keys(vis).length === 7, Object.keys(vis).join());
-
-  // 12. the double-click launcher. The .lnk is written by PowerShell and cannot be
-  // checked from here, but the launcher it points at can: it must start node
-  // hidden (0) and open the browser (--open), from the editor's own folder.
-  const vbs = vbsLauncher(8787);
-  ok('the launcher starts node hidden', /sh\.Run .*, 0, False/.test(vbs));
-  ok('the launcher passes --open', vbs.includes('--port 8787 --open'));
-  ok('the launcher sets its working directory to the editor',
-    vbs.includes('sh.CurrentDirectory = here'), vbs.match(/sh\.CurrentDirectory.*/)?.[0]);
-  ok('the launcher resolves node without a hardcoded drive',
-    !/[A-Z]:\\\\/.test(vbs) && vbs.includes('%ProgramFiles%'));
-  ok('the launcher is CRLF-terminated for wscript', vbs.endsWith('\r\n'));
-  // The Run line is the one place quoting happens. An earlier version stored quotes
-  // inside the node variable *and* added a pair here, so the command line reached
-  // wscript with doubled quotes and died with "cannot find the file specified".
-  // The exact line is asserted because the failure is invisible until launch.
-  ok('the Run line quotes each path exactly once',
-    vbs.includes('sh.Run """" & node & """ """ & here & "\\server.js"" --port 8787 --open", 0, False'),
-    vbs.split('\r\n').find(l => l.startsWith('sh.Run')));
-  ok('the node variable stores no quotes of its own',
-    vbs.includes('node = sh.ExpandEnvironmentStrings("%ProgramFiles%") & "\\nodejs\\node.exe"'));
-
-  // wscript reads a .vbs as ANSI. A non-ASCII byte in a comment is still bytes it
-  // has to parse, so the whole file stays ASCII.
-  ok('the launcher is pure ASCII for wscript', /^[\x00-\x7F]*$/.test(vbs),
-    [...vbs].filter(c => c.charCodeAt(0) > 127).join('') || 'all ASCII');
-
-  // 13. PowerShell string quoting. A path with an apostrophe is legal on Windows
-  // and would otherwise truncate the -Command and create nothing.
-  ok('psQuote wraps in single quotes', psQuote('C:\\x\\y.lnk') === `'C:\\x\\y.lnk'`);
-  ok('psQuote doubles an embedded apostrophe',
-    psQuote("C:\\Users\\O'Brien\\s.lnk") === `'C:\\Users\\O''Brien\\s.lnk'`,
-    psQuote("C:\\Users\\O'Brien\\s.lnk"));
-
-  // 14. the Desktop the shortcut lands in. On Windows the registry is the only
-  // authoritative answer — a OneDrive-redirected Desktop is where the user actually
-  // looks, while ~/Desktop can still exist as a stale folder. That stale folder is
-  // exactly how the first attempt put the .lnk somewhere invisible.
-  if (process.platform === 'win32') {
-    const d = desktopDirWin();
-    ok('desktopDirWin returns an existing folder', !!d && fs.existsSync(d), d || '(none)');
-    ok('desktopDirWin returns an absolute path', !!d && path.isAbsolute(d), d || '(none)');
-    const reg = spawnSync('reg', ['query',
-      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders',
-      '/v', 'Desktop'], { encoding: 'utf8', windowsHide: true });
-    const raw = /REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/m.exec(reg.stdout || '');
-    if (raw) {
-      const want = raw[1].replace(/%([^%]+)%/g, (_, v) => process.env[v] || `%${v}%`);
-      ok('desktopDirWin agrees with the registry, not ~/Desktop', d === want, `got ${d}, registry ${want}`);
-      // The whole point of the fix: when they differ, the registry wins.
-      const stale = path.join(os.homedir(), 'Desktop');
-      if (fs.existsSync(stale) && stale !== want) {
-        ok('a stale ~/Desktop does not win over the redirected one', d !== stale,
-          `registry ${want}, stale ${stale}`);
-      }
+// Everything the endpoint said about each model, by id. `caps` is the endpoint's own
+// capabilities object passed through untouched — its keys are that gateway's
+// vocabulary, not ours, so a gateway reporting something new needs no change here.
+// The rest is derived, and each field has more than one shape in the wild: numbers
+// arrive flat (context_length), nested (capabilities.contextWindow) or per-upstream
+// (top_provider.max_completion_tokens), so every spelling is tried in turn and a
+// field nobody reported stays out rather than being guessed at. `meta` is the display
+// layer: a human name, whether the model is free, whether it is on its way out.
+function modelCaps(rows) {
+  const out = {};
+  for (const m of rows) {
+    if (!m || typeof m !== 'object') continue;
+    const id = m.id || m.name || m.model;
+    if (typeof id !== 'string' || !id) continue;
+    const src = m.capabilities;
+    const caps = src && typeof src === 'object' && !Array.isArray(src) ? { ...src } : {};
+    if (typeof caps.vision !== 'boolean') {
+      const v = rowVision(m);
+      if (typeof v === 'boolean') caps.vision = v;
     }
+    // OpenRouter reports tool support as a parameter list, not a flag.
+    if (Array.isArray(m.supported_parameters) && typeof caps.tools !== 'boolean') {
+      caps.tools = m.supported_parameters.includes('tools');
+    }
+    // kenari and models.dev report the same facts as flat booleans. Only exact names
+    // are aliased — a field whose meaning has to be interpreted is left alone.
+    if (typeof m.tool_call === 'boolean' && typeof caps.tools !== 'boolean') caps.tools = m.tool_call;
+    if (typeof m.reasoning === 'boolean' && typeof caps.reasoning !== 'boolean') caps.reasoning = m.reasoning;
+    // Reasoning levels, from either spelling: a flat list (kenari's reasoning_options)
+    // or OpenRouter's nested reasoning.supported_efforts.
+    const efforts = [
+      ...(Array.isArray(m.reasoning_options) ? m.reasoning_options : []),
+      ...(m.reasoning && Array.isArray(m.reasoning.supported_efforts) ? m.reasoning.supported_efforts : []),
+    ].filter(x => typeof x === 'string');
+    const p = m.pricing && typeof m.pricing === 'object' ? m.pricing : {};
+    // Free is explicit on some gateways (kenari) and a zero price on others.
+    const free = typeof p.free === 'boolean' ? p.free
+      : (p.prompt !== undefined || p.completion !== undefined) && !num(p.prompt) && !num(p.completion);
+    out[id] = {
+      provider: str(m.owned_by),
+      ctx: num(m.context_length) ?? num(m.max_input_tokens) ?? num(caps.contextWindow)
+        ?? num(m.limit && m.limit.context) ?? num(m.top_provider && m.top_provider.context_length) ?? 0,
+      maxOut: num(m.max_completion_tokens) ?? num(m.max_tokens) ?? num(caps.maxOutput)
+        ?? num(m.limit && m.limit.output) ?? num(m.top_provider && m.top_provider.max_completion_tokens) ?? 0,
+      caps,
+      meta: {
+        name: str(m.display_name) || str(m.name),
+        description: str(m.description),
+        free,
+        sunset: str(m.sunset_at) || str(m.expiration_date),
+        efforts: [...new Set(efforts)],
+        endpoints: (Array.isArray(m.endpoints) ? m.endpoints : []).filter(x => typeof x === 'string'),
+      },
+    };
   }
-
-  // 10. the backup rotation keeps the last N and prunes older ones. This is the
-  // only undo this editor has, so it gets a check.
-  const bdir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-bak-'));
-  const bfile = path.join(bdir, 'settings.json');
-  fs.writeFileSync(bfile, '{"v":0}');
-  for (let v = 1; v <= BACKUPS + 3; v++) {
-    backupBeforeWrite(bfile);
-    fs.writeFileSync(bfile, `{"v":${v}}`);
-  }
-  const kept = fs.readdirSync(path.join(bdir, 'backups')).sort();
-  ok(`backup rotation keeps ${BACKUPS}`, kept.length === BACKUPS, `${kept.length} kept`);
-  ok('backup names are prefixed by the file', kept.every(f => f.startsWith('settings.json.backup.')));
-  // The newest backup must hold the version just before the current file.
-  const newest = fs.readFileSync(path.join(bdir, 'backups', kept[kept.length - 1]), 'utf8');
-  ok('newest backup is the previous version', newest === `{"v":${BACKUPS + 2}}`, newest);
-  fs.rmSync(bdir, { recursive: true, force: true });
-
-  // 11. the "did it actually change?" predicate the save path uses. A no-op save
-  // must not consume a backup slot, and the comparison is on the serialised bytes,
-  // so it has to be true for an already-canonical file and false once a value moves.
-  const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-noop-'));
-  const cfile = path.join(cdir, 'settings.json');
-  const canonical = '{\n  "env": {\n    "A": "1"\n  }\n}\n';
-  fs.writeFileSync(cfile, canonical);
-  const cur = readSettings(cfile);
-  const reserialise = d => JSON.stringify(d, null, 2).replace(/\n/g, cur.eol) + cur.eol;
-  ok('canonical file compares equal (no backup)', cur.raw === reserialise(cur.parsed));
-  ok('a changed value compares unequal (backup)', cur.raw !== reserialise({ env: { A: '2' } }));
-  fs.rmSync(cdir, { recursive: true, force: true });
-
-  // 15. --dir places the shortcut wherever it is asked to. The public desktop is
-  // the case that needs it: the icon there shows up for every account on the
-  // machine, so it is a deliberate choice rather than a fallback. A relative path
-  // must resolve against the editor's own folder, not the caller's working dir.
-  ok('a relative --dir resolves against the editor folder',
-    resolveDirArg('sub') === path.join(HERE, 'sub'), resolveDirArg('sub'));
-  ok('an absolute --dir is taken as given',
-    resolveDirArg(path.join(os.tmpdir(), 'x')) === path.join(os.tmpdir(), 'x'),
-    resolveDirArg(path.join(os.tmpdir(), 'x')));
-  ok('no --dir means no override', resolveDirArg(null) === null);
-
-  // 16. the three simple-mode formats. Each is patched as text, not re-serialised
-  // through a parser, because this project has no dependency to parse them with —
-  // so the property that matters is the one that is easy to get wrong: everything
-  // the editor does not own must come out the other side byte-identical.
-  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-simple-'));
-  const codexPath = path.join(sdir, 'config.toml');
-  const codexSeed = [
-    'model = "old-model"',
-    'model_provider = "9router"',
-    'model_reasoning_effort = "medium"',
-    '',
-    '[model_providers.9router]',
-    'name = "9Router"',
-    'base_url = "http://localhost:20128/v1"',
-    'experimental_bearer_token = "sk-old"',
-    'wire_api = "responses"',
-    '',
-    '[windows]',
-    'sandbox = "elevated"',
-    '',
-    "[projects.'d:\\work\\x']",
-    'trust_level = "trusted"',
-    '',
-  ].join('\n');
-  fs.writeFileSync(codexPath, codexSeed);
-  const cw = { baseUrl: 'http://127.0.0.1:8787', apiKey: 'sk-new', model: 'gpt-5' };
-  const codexOut = codexWrite(codexSeed, cw);
-  const codexBack = codexRead(codexOut);
-  ok('codex: base URL is normalised to /v1', codexBack.baseUrl === 'http://127.0.0.1:8787/v1', codexBack.baseUrl);
-  ok('codex: the key round-trips', codexBack.apiKey === 'sk-new', codexBack.apiKey);
-  ok('codex: the model round-trips', codexBack.model === 'gpt-5', codexBack.model);
-  ok('codex: model_provider points at the provider', tomlTopValue(codexOut, 'model_provider') === '9router');
-  // The whole reason for text surgery: sections this editor knows nothing about.
-  ok('codex: [windows] survives untouched', codexOut.includes('[windows]\nsandbox = "elevated"'));
-  ok('codex: a quoted-key project section survives', codexOut.includes("[projects.'d:\\work\\x']"));
-  ok('codex: a scalar nobody owns survives', codexOut.includes('model_reasoning_effort = "medium"'));
-  ok('codex: exactly one provider section is left', (codexOut.match(/\[model_providers\.9router\]/g) || []).length === 1);
-  ok('codex: the old key is gone', !codexOut.includes('sk-old'));
-  // A key of the same name inside a section is not the top-level one.
-  const nested = '[a]\nmodel = "inner"\n';
-  ok('codex: a section-local key is not read as top-level', tomlTopValue(nested, 'model') === '', tomlTopValue(nested, 'model'));
-  ok('codex: writing into a sectionless file inserts above nothing',
-    tomlSetTop('model = "a"\n', 'model_provider', '9router') === 'model = "a"\nmodel_provider = "9router"\n',
-    JSON.stringify(tomlSetTop('model = "a"\n', 'model_provider', '9router')));
-  ok('codex: a file with no sections still gets one',
-    tomlSetSection('', 'model_providers.9router', '[model_providers.9router]\nname = "x"').startsWith('[model_providers.9router]'));
-  ok('codex: a key with a backslash and quote survives', (() => {
-    const t = codexWrite('', { baseUrl: 'http://h', apiKey: 'a"b\\c', model: 'm' });
-    return codexRead(t).apiKey === 'a"b\\c';
-  })(), codexRead(codexWrite('', { baseUrl: 'http://h', apiKey: 'a"b\\c', model: 'm' })).apiKey);
-  // A base that already ends in /v1 — with or without a trailing slash — must not
-  // grow a second one. http://h/v1/ once became http://h/v1/v1.
-  ok('withV1 leaves a bare base alone', withV1('http://h') === 'http://h/v1', withV1('http://h'));
-  ok('withV1 leaves a /v1 base alone', withV1('http://h/v1') === 'http://h/v1', withV1('http://h/v1'));
-  ok('withV1 strips a trailing slash before the /v1 check',
-    withV1('http://h/v1/') === 'http://h/v1', withV1('http://h/v1/'));
-  ok('codex: a /v1/ base URL is normalised, not doubled', (() => {
-    const t = codexWrite('', { baseUrl: 'http://h/v1/', apiKey: '', model: 'm' });
-    return codexRead(t).baseUrl === 'http://h/v1';
-  })());
-
-  const ocSeed = JSON.stringify({
-    $schema: 'https://opencode.ai/config.json',
-    provider: { other: { npm: '@ai-sdk/openai-compatible', options: { baseURL: 'https://x/v1' } } },
-    agent: { explorer: { model: '9router/old' } },
-  }, null, 2);
-  const ocOut = opencodeWrite(ocSeed, { baseUrl: 'http://127.0.0.1:8787', apiKey: 'sk-oc', model: 'gpt-5' });
-  const ocBack = opencodeRead(ocOut);
-  const ocJson = JSON.parse(ocOut);
-  ok('opencode: base URL is normalised to /v1', ocBack.baseUrl === 'http://127.0.0.1:8787/v1', ocBack.baseUrl);
-  ok('opencode: the key round-trips', ocBack.apiKey === 'sk-oc', ocBack.apiKey);
-  ok('opencode: the model round-trips', ocBack.model === 'gpt-5', ocBack.model);
-  ok('opencode: the active model is namespaced', ocJson.model === '9router/gpt-5', ocJson.model);
-  ok('opencode: another provider is left alone', ocJson.provider.other.options.baseURL === 'https://x/v1');
-  ok('opencode: a section nobody owns survives', ocJson.agent.explorer.model === '9router/old');
-  ok('opencode: the model is registered in the provider', !!ocJson.provider['9router'].models['gpt-5']);
-  ok('opencode: JSONC trailing commas are tolerated',
-    opencodeRead('{"provider":{"9router":{"options":{"baseURL":"http://a/v1"},},},}').baseUrl === 'http://a/v1');
-  ok('opencode: an unparseable file is reported, not thrown',
-    opencodeRead('{ not json').broken === true);
-
-  const hermesSeed = [
-    'agent:',
-    '  name: hermes',
-    '',
-    'model:',
-    '  default: "old-model"',
-    '  provider: "custom"',
-    '  base_url: "http://localhost:20128/v1"',
-    '  api_key: ${OPENAI_API_KEY}',
-    '',
-    'tools:',
-    '  - shell',
-    '',
-  ].join('\n');
-  const hOut = hermesWrite(hermesSeed, { baseUrl: 'http://127.0.0.1:8787', apiKey: 'sk-h', model: 'gpt-5' });
-  const hBack = hermesRead(hOut);
-  ok('hermes: base URL is normalised to /v1', hBack.baseUrl === 'http://127.0.0.1:8787/v1', hBack.baseUrl);
-  ok('hermes: the model round-trips', hBack.model === 'gpt-5', hBack.model);
-  ok('hermes: the block still reads the key from the env', hOut.includes('api_key: ${OPENAI_API_KEY}'));
-  ok('hermes: the block is emitted once', (hOut.match(/^model:/gm) || []).length === 1);
-  ok('hermes: keys above the block survive', hOut.includes('agent:\n  name: hermes'));
-  ok('hermes: keys below the block survive', hOut.includes('tools:\n  - shell'));
-  // The blank line between the block and the next key is layout the user chose.
-  ok('hermes: the separator after the block is preserved',
-    /api_key: \$\{OPENAI_API_KEY\}\n\ntools:/.test(hOut),
-    JSON.stringify(hOut.slice(hOut.indexOf('api_key'), hOut.indexOf('api_key') + 60)));
-  ok('hermes: a file with no model block gets one prepended',
-    hermesWrite('agent:\n  name: h\n', { baseUrl: 'http://h', apiKey: '', model: 'm' }).startsWith('model:\n'));
-  const envOut = envVarSet('OPENAI_API_KEY=old\nOTHER=1\n', 'OPENAI_API_KEY', 'sk-h');
-  ok('hermes: the key is upserted in .env', envOut.includes('OPENAI_API_KEY=sk-h'));
-  ok('hermes: another .env line survives', envOut.includes('OTHER=1'));
-  ok('hermes: a missing .env gets the line',
-    envVarSet('', 'OPENAI_API_KEY', 'sk-h') === 'OPENAI_API_KEY=sk-h\n', JSON.stringify(envVarSet('', 'OPENAI_API_KEY', 'sk-h')));
-  ok('hermes: an existing key is replaced, not appended',
-    (envVarSet('OPENAI_API_KEY=old\n', 'OPENAI_API_KEY', 'sk-h').match(/OPENAI_API_KEY=/g) || []).length === 1);
-  fs.rmSync(sdir, { recursive: true, force: true });
-
-  for (const c of checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}${c.detail ? `  (${c.detail})` : ''}`);
-  const failed = checks.filter(c => !c.pass).length;
-  console.log(`\n${checks.length - failed}/${checks.length} passed`);
-  process.exit(failed ? 1 : 0);
+  return out;
 }
+
 
 // ---------------------------------------------------------------------- routes
 
@@ -1168,19 +1023,25 @@ async function handler(req, res, port) {
     if (!payload) return;
     const tool = toolById(typeof payload.tool === 'string' ? payload.tool : 'claude');
     if (!tool) return send(res, 400, JSON.stringify({ error: `unknown tool: ${payload.tool}` }));
-    const info = { ...scanInfo(tool), tools: TOOLS };
+    const info = { ...scanInfo(tool), tools: toolList() };
     console.log(info.found ? `scan found ${info.file}` : `scan found nothing at ${info.file}`);
     return send(res, 200, JSON.stringify(info));
   }
 
-  // The tool list, for a page that wants to draw the picker before any scan.
+  // The tool list, for a page that wants to draw the picker before any scan. Gated
+  // with the rest: it is the same shape of request, and one rule beats a per-route guess.
   if (req.method === 'GET' && p === '/api/tools') {
-    return send(res, 200, JSON.stringify({ tools: TOOLS }));
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    return send(res, 200, JSON.stringify({ tools: toolList() }));
   }
 
   // The settings of one tool. `?tool=` defaults to claude so an older page that
   // never learned about tools keeps working unchanged.
   if (req.method === 'GET' && p === '/api/settings') {
+    // This reply carries env.ANTHROPIC_AUTH_TOKEN, so the read needs the same gate
+    // as the write: a DNS-rebinding page reaches 127.0.0.1 with Host=evil.com and
+    // would otherwise read the token straight out of the JSON.
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
     const tool = toolById(url.searchParams.get('tool') || 'claude');
     if (!tool) return send(res, 400, JSON.stringify({ error: 'unknown tool' }));
     const paths = toolPaths(tool.id);
@@ -1253,7 +1114,66 @@ async function handler(req, res, port) {
       .filter(m => typeof m === 'string' && m)
       .sort((a, b) => a.localeCompare(b));
     console.log(`models: ${models.length} from ${url.href}`);
-    return send(res, 200, JSON.stringify({ url: url.href, models, windows: modelWindows(rows), vision: modelVision(rows) }));
+    return send(res, 200, JSON.stringify({ url: url.href, models, caps: modelCaps(rows) }));
+  }
+
+  // Is this model actually answering? One tiny completion is the only honest test:
+  // a model can be listed and still be down upstream. Nothing about the answer is
+  // read, so a 200 is the whole signal.
+  if (req.method === 'POST' && p === '/api/test-model') {
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    const payload = await jsonBody(req, res);
+    if (!payload) return;
+    const base = typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
+    const token = typeof payload.apiKey === 'string' ? payload.apiKey.trim() : '';
+    const model = typeof payload.model === 'string' ? payload.model.trim() : '';
+    if (!base) return send(res, 400, JSON.stringify({ error: 'Base URL is empty.' }));
+    if (!model) return send(res, 400, JSON.stringify({ error: 'No model to test.' }));
+
+    let url;
+    try { url = chatUrl(base); } catch { return send(res, 400, JSON.stringify({ error: `"${base}" is not a valid URL.` })); }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return send(res, 400, JSON.stringify({ error: `Base URL must be http or https, got ${url.protocol}` }));
+    }
+
+    const headers = { 'content-type': 'application/json', accept: 'application/json' };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const started = Date.now();
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16, stream: false }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const text = await r.text();
+      const ms = Date.now() - started;
+      if (!r.ok) {
+        let detail = text.slice(0, 300);
+        try {
+          const b = JSON.parse(text);
+          detail = b?.error?.message || b?.error || b?.message || detail;
+        } catch { /* not json */ }
+        return send(res, 200, JSON.stringify({ ok: false, ms, error: `${r.status}: ${detail}` }));
+      }
+      return send(res, 200, JSON.stringify({ ok: true, ms }));
+    } catch (e) {
+      const c = e.cause || {};
+      const why = e.name === 'TimeoutError' ? 'timed out after 30s'
+        : (c.code || c.message) ? `${c.code ? `${c.code}: ` : ''}${c.message || ''}`.trim()
+        : e.message;
+      return send(res, 200, JSON.stringify({ ok: false, ms: Date.now() - started, error: why }));
+    }
+  }
+
+  // The launcher opens a console window that is easy to forget. This is the switch
+  // for it: answer first, then exit, so the browser gets the reply.
+  if (req.method === 'POST' && p === '/api/shutdown') {
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    send(res, 200, JSON.stringify({ ok: true }));
+    console.log('\n  stopped from the page.\n');
+    setTimeout(() => process.exit(0), 200);
+    return;
   }
 
   if (req.method === 'POST' && p === '/api/settings') {
@@ -1291,8 +1211,11 @@ async function handler(req, res, port) {
       // Stale-write guard, same as env mode: another writer may have touched the
       // file since load. Only the main file is guarded — the Hermes .env upsert
       // is append-only and low-risk.
+      // The check runs whenever the client sent a mtime at all — 0 means "there was
+      // no file when I loaded", which is exactly the case that must not silently
+      // overwrite a file another writer created in the meantime.
       const before = readText(file);
-      if (before !== null && payload.baseMtimeMs) {
+      if (before !== null && Number.isFinite(payload.baseMtimeMs)) {
         try {
           const m = fs.statSync(file).mtimeMs;
           if (Math.abs(m - payload.baseMtimeMs) > 1) {
@@ -1314,16 +1237,22 @@ async function handler(req, res, port) {
       return send(res, 200, JSON.stringify({ ok: true, file, bytes: st.size, mtimeMs: st.mtimeMs, backup, text }));
     }
 
-    if (typeof payload.doc === 'undefined') return send(res, 400, JSON.stringify({ error: 'missing doc' }));
+    // A doc that is not an object would be written straight to the file as
+    // `"not-an-object"` — valid JSON, but not a settings file. Refused here.
+    if (!payload.doc || typeof payload.doc !== 'object' || Array.isArray(payload.doc)) {
+      return send(res, 400, JSON.stringify({ error: 'doc must be a JSON object' }));
+    }
     const current = readSettings(file);
 
     // Stale-write guard: Claude Code writes this file live. Last-write-wins would
     // silently discard whatever landed since load. 409 keeps the client's draft.
-    if (current.exists && payload.baseMtimeMs && Math.abs(current.mtimeMs - payload.baseMtimeMs) > 1) {
+    // Number.isFinite, not truthiness: baseMtimeMs 0 means the file was absent at
+    // load, and a file that appeared since must be a conflict, not a free overwrite.
+    if (current.exists && Number.isFinite(payload.baseMtimeMs) && Math.abs(current.mtimeMs - payload.baseMtimeMs) > 1) {
       return send(res, 409, JSON.stringify({ error: 'file changed on disk since you loaded it', mtimeMs: current.mtimeMs }));
     }
 
-    const text = JSON.stringify(payload.doc, null, 2).replace(/\n/g, current.eol || '\n') + (current.eol || '\n');
+    const text = (current.bom ? '\uFEFF' : '') + JSON.stringify(payload.doc, null, 2).replace(/\n/g, current.eol || '\n') + (current.eol || '\n');
     // Back up only when the bytes actually change, so a no-op save does not burn a
     // slot in the rotation.
     let backup = null;
@@ -1348,11 +1277,22 @@ async function handler(req, res, port) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (argv.includes('--selftest')) return selftest();
+  // The selftest moved to tools/selftest.js (it needs the whole module, so keeping it
+  // inline meant the server carried 600 lines of assertions). This flag stays because
+  // it is in the README, the launcher and muscle memory — it just forwards.
+  if (argv.includes('--selftest')) return require('./tools/selftest.js').run();
 
   const portArg = argv.indexOf('--port');
   const port = portArg > -1 ? Number(argv[portArg + 1]) : 8787;
   const open = argv.includes('--open');
+
+  // `--port abc` used to reach net.listen as NaN and surface as a raw RangeError
+  // stack. start.cmd now pauses on any non-zero exit, so a bad flag would park a
+  // stack trace in front of a double-clicking user. One sentence instead.
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`\n  "${argv[portArg + 1]}" is not a usable port. Try: node server.js --port 8787\n`);
+    process.exit(1);
+  }
 
   // Write the double-click launcher and stop. `start.cmd --shortcut` is the one
   // command a user needs to run once; after that the desktop icon is the entry point.
@@ -1370,7 +1310,11 @@ async function main() {
     if (made.file && made.dir) console.log(`  ${made.file}`);
     else console.log(`  launcher: ${made.vbs}`);
     if (made.note) console.log(`  ${made.note}`);
-    console.log(`\n  It starts the server on port ${port} hidden and opens http://127.0.0.1:${port}\n`);
+    // "hidden" is a Windows-only property: the .vbs starts node with a hidden window.
+    // Linux and macOS launch it like any other app, so the line must not claim it.
+    console.log(process.platform === 'win32'
+      ? `\n  It starts the server on port ${port} hidden and opens http://127.0.0.1:${port}\n`
+      : `\n  It starts the server on port ${port} and opens http://127.0.0.1:${port}\n`);
     return;
   }
 
@@ -1405,4 +1349,100 @@ async function main() {
   });
 }
 
-main();
+// Run directly it is a server; required, it is the module its own tests and tools read.
+module.exports = {
+  spawnSync,
+  spawn,
+  stripTypeScriptTypes,
+  missing,
+  http,
+  fs,
+  path,
+  os,
+  HERE,
+  INDEX,
+  APP_TS,
+  ICONS,
+  configDir,
+  hermesHome,
+  codexHome,
+  opencodeDir,
+  MAX_BODY,
+  appJs,
+  detectEol,
+  settingsFile,
+  TOOLS,
+  toolById,
+  hasBin,
+  toolList,
+  toolPaths,
+  PROVIDER,
+  PROVIDER_LABEL,
+  scanInfo,
+  readSettings,
+  BACKUPS,
+  backupBeforeWrite,
+  sleep,
+  atomicWrite,
+  readText,
+  withV1,
+  tomlString,
+  tomlUnquote,
+  tomlTopValue,
+  tomlSectionValues,
+  tomlSetTop,
+  tomlSetSection,
+  tomlSetInSection,
+  codexKey,
+  codexRead,
+  codexWrite,
+  jsoncParse,
+  opencodeRead,
+  opencodeWrite,
+  HERMES_MODEL_RE,
+  HERMES_DELEGATION_RE,
+  HERMES_AUX_RE,
+  HERMES_ROLES,
+  hermesRoleRe,
+  hermesBlockValue,
+  hermesRead,
+  hermesPatchBlock,
+  hermesBuildBlock,
+  hermesSetTopBlock,
+  hermesSetRole,
+  hermesWrite,
+  envVarSet,
+  readSimple,
+  writeSimple,
+  send,
+  isUp,
+  openBrowser,
+  originOk,
+  readBody,
+  jsonBody,
+  modelsUrl,
+  chatUrl,
+  psQuote,
+  vbsLauncher,
+  installShortcutWindows,
+  execQuote,
+  shQuote,
+  installShortcutLinux,
+  installShortcutMac,
+  resolveDirArg,
+  desktopDirWin,
+  installShortcut,
+  modelWindows,
+  VISION_TRUE_TOKENS,
+  visionFromModalities,
+  VISION_BOOL_KEYS,
+  VISION_MOD_KEYS,
+  rowVision,
+  modelVision,
+  num,
+  modelCaps,
+  handler,
+  main,
+};
+
+if (require.main === module) main();

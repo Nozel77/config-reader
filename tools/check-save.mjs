@@ -8,6 +8,7 @@ import { writeFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdtempSy
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 
 const SCRATCH = mkdtempSync(join(tmpdir(), 'csui-save-'));
 const FILE = join(SCRATCH, 'settings.json');
@@ -17,8 +18,17 @@ const PORT = 8843;
 // HOME/USERPROFILE are redirected too: the non-Claude tools keep their configs in
 // their own dotfolders under the home dir, and those must land in the scratch dir
 // as well. os.homedir() reads USERPROFILE on Windows and HOME elsewhere, so both.
+//
+// HERMES_HOME must be redirected as well, and for the same reason: the real one is
+// set machine-wide by the Hermes installer, so a server started without it would
+// read the live config out from under the running agent. Both the main server and
+// the HERMES_HOME probe below are pinned to scratch dirs.
+const scratchEnv = extra => ({
+  ...process.env, CLAUDE_CONFIG_DIR: SCRATCH, HOME: SCRATCH, USERPROFILE: SCRATCH,
+  HERMES_HOME: join(SCRATCH, '.hermes'), ...extra,
+});
 const server = spawn(process.execPath, [join(process.cwd(), 'server.js'), '--port', String(PORT)], {
-  env: { ...process.env, CLAUDE_CONFIG_DIR: SCRATCH, HOME: SCRATCH, USERPROFILE: SCRATCH },
+  env: scratchEnv(),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let log = '';
@@ -222,5 +232,151 @@ const stillClaude2 = await get('/api/settings?tool=claude');
 ok('?tool=claude is the same file', stillClaude2.selected === FILE, stillClaude2.selected);
 ok('the claude file still holds its env', stillClaude2.parsed.env.ANTHROPIC_MODEL === 'test-model',
   JSON.stringify(stillClaude2.parsed.env));
+
+// --- the read that carries a token is gated like the write ------------------
+// A DNS-rebinding page reaches 127.0.0.1 with Host=evil.com and no Origin. The
+// GET reply holds env.ANTHROPIC_AUTH_TOKEN, so it must be refused the same way.
+const rawGet = (path, headers) => new Promise(resolve => {
+  const req = http.request({ host: '127.0.0.1', port: PORT, path, method: 'GET', headers }, res => {
+    let d = ''; res.on('data', c => { d += c; }); res.on('end', () => resolve({ status: res.statusCode, d }));
+  });
+  req.end();
+});
+const rebind = await rawGet('/api/settings', { Host: 'evil.example.com' });
+ok('a rebound Host cannot read settings', rebind.status === 403, `status ${rebind.status}`);
+ok('the refused reply carries no token', !rebind.d.includes('ANTHROPIC_AUTH_TOKEN'), rebind.d.slice(0, 80));
+const rebindTools = await rawGet('/api/tools', { Host: 'evil.example.com' });
+ok('a rebound Host cannot read the tool list', rebindTools.status === 403, `status ${rebindTools.status}`);
+const goodHost = await rawGet('/api/settings', { Host: `127.0.0.1:${PORT}` });
+ok('the real page still reads settings', goodHost.status === 200, `status ${goodHost.status}`);
+
+// --- a save with no mtime must not overwrite a file that appeared since ------
+// baseMtimeMs 0 means "there was no file when I loaded". A file created by another
+// writer in the meantime is a conflict, not a free overwrite.
+const s5 = await get('/api/settings');
+await post('/api/settings', { doc: { env: { A: 'x' } }, baseMtimeMs: s5.mtimeMs });
+rmSync(FILE);                                   // file gone at load -> mtimeMs 0
+const created = await get('/api/settings');
+ok('an absent file reports mtime 0', created.exists === false && created.mtimeMs === 0, `${created.exists} ${created.mtimeMs}`);
+writeFileSync(FILE, '{\n  "env": {\n    "A": "someone-else"\n  }\n}\n');   // external writer wins the race
+const clobber = await post('/api/settings', { doc: { env: { A: 'mine' } }, baseMtimeMs: 0 });
+ok('a file created since load is a 409, not a silent overwrite', clobber.status === 409, `status ${clobber.status}`);
+ok('the external writer\'s content survived', readFileSync(FILE, 'utf8').includes('someone-else'),
+  readFileSync(FILE, 'utf8'));
+
+// --- a doc that is not an object is refused ----------------------------------
+const notObj = await post('/api/settings', { doc: 'not-an-object', baseMtimeMs: 0 });
+ok('a string doc is refused', notObj.status === 400, `status ${notObj.status}`);
+const arrDoc = await post('/api/settings', { doc: ['a'], baseMtimeMs: 0 });
+ok('an array doc is refused', arrDoc.status === 400, `status ${arrDoc.status}`);
+
+// --- CRLF survives a simple-mode save ----------------------------------------
+mkdirSync(join(SCRATCH, '.hermes'), { recursive: true });
+writeFileSync(join(SCRATCH, '.hermes', 'config.yaml'),
+  'model:\r\n  default: old\r\n  provider: custom\r\n  base_url: http://x/v1\r\n\r\nagent:\r\n  max_turns: 5\r\n');
+await post('/api/settings', { tool: 'hermes', values: { baseUrl: 'http://y', apiKey: '', model: 'new' } });
+const crlf = readFileSync(join(SCRATCH, '.hermes', 'config.yaml'), 'utf8');
+ok('a CRLF config stays CRLF after a simple save', !/(?<!\r)\n/.test(crlf), JSON.stringify(crlf.slice(0, 60)));
+ok('the untouched keys below the block survive', crlf.includes('agent:\r\n  max_turns: 5'));
+
+// --- a model: block keeps the keys this editor has no field for --------------
+// The rebuild this replaced dropped context_length and rewrote the user's own
+// api_key reference to OPENAI_API_KEY, which broke a live config.
+writeFileSync(join(SCRATCH, '.hermes', 'config.yaml'), [
+  'model:',
+  '  default: kenari/x',
+  '  provider: custom',
+  '  base_url: https://ai.example/v1',
+  '  context_length: 0',
+  '  api_key: ${MY_OWN_KEY}',
+  'agent:',
+  '  max_turns: 5',
+  '',
+].join('\n'));
+await post('/api/settings', { tool: 'hermes', values: { baseUrl: 'https://ai.example', apiKey: '', model: 'new-model' } });
+const keptBlock = readFileSync(join(SCRATCH, '.hermes', 'config.yaml'), 'utf8');
+ok('a key the editor has no field for survives the block', keptBlock.includes('context_length: 0'), keptBlock);
+ok('the user\'s own api_key reference is left alone', keptBlock.includes('${MY_OWN_KEY}'), keptBlock);
+ok('the model the editor owns was updated', keptBlock.includes('default: "new-model"'), keptBlock);
+ok('the block is still emitted once', (keptBlock.match(/^model:/gm) || []).length === 1);
+ok('keys below the block survive', keptBlock.includes('agent:\n  max_turns: 5'));
+
+// --- HERMES_HOME decides where Hermes is edited ------------------------------
+// The Hermes installer puts HERMES_HOME in the user env; ~/.hermes can be an
+// empty leftover. Editing that leftover writes a config nothing ever reads.
+const altHome = join(SCRATCH, 'hermes-home');
+mkdirSync(altHome, { recursive: true });
+writeFileSync(join(altHome, 'config.yaml'), 'model:\n  default: elsewhere\n');
+const srv2 = spawn(process.execPath, [join(process.cwd(), 'server.js'), '--port', String(PORT + 1)], {
+  env: scratchEnv({ HERMES_HOME: altHome }),
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+let up2 = false;
+for (let i = 0; i < 60 && !up2; i++) {
+  try { await fetch(`http://127.0.0.1:${PORT + 1}/api/tools`); up2 = true; }
+  catch { await new Promise(r => setTimeout(r, 100)); }
+}
+if (up2) {
+  const h2 = await fetch(`http://127.0.0.1:${PORT + 1}/api/settings?tool=hermes`).then(r => r.json());
+  ok('HERMES_HOME moves the hermes config path', h2.file === join(altHome, 'config.yaml'), h2.file);
+} else {
+  ok('HERMES_HOME moves the hermes config path', false, 'second server never came up');
+}
+srv2.kill();
+
+// --- CODEX_HOME and XDG_CONFIG_HOME decide where those tools are edited -------
+// Same class of bug as HERMES_HOME: a tool that reads a config from somewhere
+// else entirely gets an edit nothing will ever open.
+const toolHome = join(SCRATCH, 'tool-home');
+mkdirSync(join(toolHome, 'codex'), { recursive: true });
+mkdirSync(join(toolHome, 'xdg', 'opencode'), { recursive: true });
+writeFileSync(join(toolHome, 'codex', 'config.toml'), 'model = "from-codex-home"\n');
+writeFileSync(join(toolHome, 'xdg', 'opencode', 'opencode.json'), '{ "model": "from-xdg" }\n');
+const srv3 = spawn(process.execPath, [join(process.cwd(), 'server.js'), '--port', String(PORT + 2)], {
+  env: scratchEnv({
+    CODEX_HOME: join(toolHome, 'codex'),
+    // On Windows opencode ignores XDG, so the expectation differs by platform.
+    XDG_CONFIG_HOME: join(toolHome, 'xdg'),
+  }),
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+let up3 = false;
+for (let i = 0; i < 60 && !up3; i++) {
+  try { await fetch(`http://127.0.0.1:${PORT + 2}/api/tools`); up3 = true; }
+  catch { await new Promise(r => setTimeout(r, 100)); }
+}
+if (up3) {
+  const cx = await fetch(`http://127.0.0.1:${PORT + 2}/api/settings?tool=codex`).then(r => r.json());
+  ok('CODEX_HOME moves the codex config path', cx.file === join(toolHome, 'codex', 'config.toml'), cx.file);
+  ok('CODEX_HOME config is the one read', cx.values.model === 'from-codex-home', JSON.stringify(cx.values));
+
+  const oc = await fetch(`http://127.0.0.1:${PORT + 2}/api/settings?tool=opencode`).then(r => r.json());
+  const wantXdg = process.platform !== 'win32';
+  ok(`XDG_CONFIG_HOME ${wantXdg ? 'moves' : 'is ignored on win32 for'} the opencode path`,
+    oc.file === join(wantXdg ? join(toolHome, 'xdg', 'opencode') : join(SCRATCH, '.config', 'opencode'), 'opencode.json'),
+    oc.file);
+} else {
+  ok('CODEX_HOME moves the codex config path', false, 'third server never came up');
+}
+srv3.kill();
+
+// --- a BOM must not make a valid file look broken ---------------------------
+// Notepad and a few Windows editors write one. Before this was handled, JSON.parse
+// threw, the UI said "not valid JSON", and the save was refused: a valid file the
+// editor could not touch. The BOM must also survive the write, or a save would
+// silently reformat the user's file.
+{
+  const bomFile = join(SCRATCH, 'bom.json');
+  const bomDoc = '{"env":{"ANTHROPIC_MODEL":"m","NOTE":"ünïcödé 日本語"}}';
+  writeFileSync(bomFile, '\uFEFF' + bomDoc);
+  const mod = await import('file:///' + join(process.cwd(), 'server.js').replace(/\\/g, '/'));
+  const read = mod.default.readSettings(bomFile);
+  ok('a BOM file parses instead of reporting invalid JSON', read.parseError === null, String(read.parseError));
+  ok('the BOM is reported to the client', read.bom === true, String(read.bom));
+  ok('the unicode value survives the parse', read.parsed.env.NOTE === 'ünïcödé 日本語', read.parsed.env.NOTE);
+  ok('a BOM file is not flagged as needing normalisation',
+    read.normalized === true, 'canonical JSON differs from the body, so normalized is honest');
+  ok('the BOM is not counted as part of the document', !JSON.stringify(read.parsed).includes('\uFEFF'));
+}
 
 finish();
