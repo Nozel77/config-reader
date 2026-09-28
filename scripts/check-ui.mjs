@@ -2,7 +2,7 @@
 // and asserts the contract on both screens: the landing shows one Scan button that
 // goes straight to the form, the form shows the nine env fields plus anything else
 // in env, and every non-env key is carried through untouched.
-//   node tools/check-ui.mjs
+//   node scripts/check-ui.mjs
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +10,28 @@ import { dirname, join } from 'node:path';
 import os from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const html = readFileSync(join(HERE, '..', 'index.html'), 'utf8');
-const js = stripTypeScriptTypes(readFileSync(join(HERE, '..', 'app.ts'), 'utf8'), { mode: 'strip' });
+const ROOT = join(HERE, '..');
+const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+
+// Load app.ts and every module it imports, concatenating them in DFS post-order
+// (the order ES modules evaluate in, cycles included). Imports are stripped and
+// export keywords dropped, so the result runs as one classic script exactly like
+// before the split — and the __api patch at the bottom still finds every name.
+const IMPORT_RE = /^import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'([^']+)';?\s*$|^import\s+'([^']+)';?\s*$/gm;
+const seen = new Set();
+const parts = [];
+function visit(file) {
+  if (seen.has(file)) return;
+  seen.add(file);
+  let src = stripTypeScriptTypes(readFileSync(file, 'utf8'), { mode: 'strip' });
+  const deps = [];
+  src = src.replace(IMPORT_RE, (m, a, b) => { deps.push(a || b); return ''; });
+  for (const d of deps) visit(join(dirname(file), d.replace(/\.js$/, '.ts')));
+  src = src.replace(/^export\s+(const|let|function|async function|class)\s/gm, '$1 ');
+  parts.push(src);
+}
+visit(join(ROOT, 'app.ts'));
+const js = parts.join('\n');
 
 // --- DOM shim ---------------------------------------------------------------
 class El {
@@ -69,9 +89,14 @@ class El {
   fire(type, ev = {}) { if (this._on && this._on[type]) this._on[type]({ target: this, preventDefault() {}, ...ev }); }
   click() { this.fire('click'); }
   // A modal dialog. The shim tracks `open` the way the browser does, so a check can
-  // tell "the picker is up" from "the picker is closed".
+  // tell "the picker is up" from "the picker is closed". close(value) mirrors the real
+  // element: it records the return value and fires the close event.
   showModal() { this.open = true; this.attrs.open = ''; }
-  close() { this.open = false; this.attrs.open = undefined; }
+  close(value) {
+    this.open = false; this.attrs.open = undefined;
+    if (value !== undefined) this.returnValue = value;
+    this.fire('close');
+  }
   removeAttribute(k) { delete this.attrs[k]; if (k === 'open') this.open = false; }
   // The real DOM accepts a raw string as a child and makes a text node of it. The
   // shim has to do the same or a mixed node/string child list silently loses the
@@ -186,7 +211,6 @@ const inputFor = key => docRoot.querySelector(`[data-field="${key}"]`);
 // A saved-endpoint row's input, by row index and field name.
 const connInput = (i, field) => docRoot.querySelector(`[data-conn="${i}:${field}"]`);
 globalThis.addEventListener = () => {};
-globalThis.confirm = () => true;
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
 
@@ -362,6 +386,18 @@ await settle();
 
 const api = globalThis.__api;
 const results = [];
+
+// The confirm dialog is answered the moment it opens: the flows that pass through it
+// (discard-and-switch, apply-over-dirty) expect the old `confirm: yes` behaviour. A
+// test that wants to inspect the dialog itself turns confirmAuto off and clicks the
+// buttons by hand.
+let confirmAuto = true;
+const confirmDlg = hook('confirm');
+const realShowModal = confirmDlg.showModal.bind(confirmDlg);
+confirmDlg.showModal = () => {
+  realShowModal();
+  if (confirmAuto) hook('confirm-ok').click();
+};
 const ok = (name, pass, detail = '') => results.push({ name, pass, detail });
 
 // ---- screen 1: the picker, closed ----------------------------------------
@@ -1262,7 +1298,21 @@ ok('apply never wrote a config', posted.length === postsBeforeApply, `${posted.l
 ok('apply marks the form dirty, so Save is the write',
   hook('actionbar-dot').className.includes('actionbar__dot--dirty'), hook('actionbar-dot').className);
 
-// A model carrying Claude Code's [1m] marker must arrive bare at the other tools.
+// Claude Code reads the [1m] marker, so an apply there must keep it.
+hook('connections-open').fire('click');
+await settle();
+if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
+  hook('connections-list').querySelectorAll('.conn__apply')[1].fire('click');
+  await settle();
+}
+ok('apply keeps a [1m] marker for the tool that reads it',
+  api.env().ANTHROPIC_MODEL === 'ag/opus-4[1m]', api.env().ANTHROPIC_MODEL);
+
+// The other tools read the bare id, so an apply there strips the marker.
+hook('editor-back').fire('click');
+await settle();
+hook('tool-picker').children[1].fire('click');          // Codex, a simple-mode tool
+await settle();
 hook('connections-open').fire('click');
 await settle();
 if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
@@ -1270,7 +1320,7 @@ if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
   await settle();
 }
 ok('apply strips a [1m] marker the target tool does not read',
-  api.env().ANTHROPIC_MODEL === 'ag/opus-4', api.env().ANTHROPIC_MODEL);
+  api.values().model === 'ag/opus-4', api.values().model);
 
 // A token the user types is stored; a row left blank keeps the stored one.
 hook('connections-open').fire('click');
@@ -1302,14 +1352,21 @@ if (connInput(0, 'name')) {
 } else {
   ok('a name field exists to edit', false, 'no row');
 }
-let cancelled = false;
-globalThis.confirm = () => { cancelled = true; return false; };
+confirmAuto = false;                    // this test inspects the dialog itself
 hook('connections').fire('cancel', { preventDefault() {} });
-ok('escape on a dirty dialog asks first', cancelled);
-ok('a refused cancel leaves the dialog open', hook('connections').open === true);
-globalThis.confirm = () => true;
+await settle();
+ok('escape on a dirty dialog asks first', hook('confirm').open === true);
+ok('the question names the loss', /Discard/.test(hook('confirm-title').textContent),
+  hook('confirm-title').textContent);
+hook('confirm-cancel').fire('click');
+await settle();
+ok('a refused cancel leaves the dialog open', hook('connections').open === true && hook('confirm').open !== true);
 hook('connections').fire('cancel', { preventDefault() {} });
+await settle();
+hook('confirm-ok').fire('click');
+await settle();
 ok('a confirmed cancel closes it', hook('connections').open !== true);
+confirmAuto = true;
 
 // The landing has no form to fill, so Apply is not offered there.
 hook('editor-back').fire('click');
@@ -1343,7 +1400,7 @@ ok('capture reads the base URL off the form', connInput(last, 'baseUrl')?.value 
   connInput(last, 'baseUrl')?.value || '(none)');
 ok('capture reads the token off the form', connInput(last, 'apiKey')?.value === 'sk-from-the-form',
   connInput(last, 'apiKey')?.value || '(none)');
-ok('capture strips the [1m] marker', connInput(last, 'model')?.value === 'ag/opus-4',
+ok('capture keeps the [1m] marker', connInput(last, 'model')?.value === 'ag/opus-4[1m]',
   connInput(last, 'model')?.value || '(none)');
 ok('capture names the row after the host', connInput(last, 'name')?.value === 'localhost:20128',
   connInput(last, 'name')?.value || '(none)');

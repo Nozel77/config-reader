@@ -130,11 +130,7 @@
         <!-- Filled in from what the scan returned. -->
         <section class="editor" data-js="editor" hidden>
           <header class="actionbar" data-js="actionbar">
-            <span
-              class="actionbar__dot"
-              data-js="actionbar-dot"
-              title="Unsaved changes"
-            ></span>
+            <span class="actionbar__dot" data-js="actionbar-dot" title="Unsaved changes"></span>
             <code class="actionbar__path" data-js="actionbar-path"></code>
             <button
               class="button button--ghost"
@@ -144,7 +140,9 @@
             >
               Reload
             </button>
-            <button class="button button--primary" type="button" data-js="save" disabled>Save</button>
+            <button class="button button--primary" type="button" data-js="save" disabled>
+              Save
+            </button>
           </header>
 
           <h2 class="editor__title" data-js="editor-title"></h2>
@@ -168,7 +166,11 @@
                 autocomplete="off"
                 aria-label="New variable name"
               />
-              <button class="button button--ghost button--small" type="button" data-js="other-vars-add">
+              <button
+                class="button button--ghost button--small"
+                type="button"
+                data-js="other-vars-add"
+              >
                 Add
               </button>
             </div>
@@ -250,14 +252,36 @@
         <button class="button button--ghost button--small" type="button" data-js="connections-new">
           Add an endpoint
         </button>
-        <button class="button button--ghost button--small" type="button" data-js="connections-capture">
+        <button
+          class="button button--ghost button--small"
+          type="button"
+          data-js="connections-capture"
+        >
           Save from the form
         </button>
         <span class="badge connections__count" data-js="connections-count"></span>
-        <button class="button button--primary" type="button" data-js="connections-save" disabled>Save</button>
+        <button class="button button--primary" type="button" data-js="connections-save" disabled>
+          Save
+        </button>
       </footer>
 
       <p class="note connections__note" data-js="connections-note"></p>
+    </dialog>
+
+    <!-- One shared confirmation dialog for the actions that lose something: unsaved
+         edits, a running server, a form about to be replaced. Same shell as the
+         picker; the button that answers carries the action's own words. -->
+    <dialog class="confirm" data-js="confirm" aria-labelledby="confirm-title">
+      <header class="confirm__head">
+        <h2 class="confirm__title" id="confirm-title" data-js="confirm-title"></h2>
+      </header>
+      <p class="confirm__message" data-js="confirm-message"></p>
+      <footer class="confirm__foot">
+        <button class="button button--ghost" type="button" data-js="confirm-cancel">Cancel</button>
+        <button class="button button--danger-solid" type="button" data-js="confirm-ok">
+          Continue
+        </button>
+      </footer>
     </dialog>
 
     <button
@@ -271,6 +295,6 @@
     <!-- A popover, so it can be seen over an open modal dialog: a modal lives in the top
          layer, where no z-index reaches. -->
     <div class="toast" data-js="toast" popover="manual" role="status" aria-live="polite"></div>
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

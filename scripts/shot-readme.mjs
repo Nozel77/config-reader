@@ -1,14 +1,14 @@
-// Dev-only. Screenshots for the README: the same page tools/shot.mjs drives, but framed
+// Dev-only. Screenshots for the README: the same page scripts/shot.mjs drives, but framed
 // at a fixed 1280x720 so every image in the README is the same size and looks like a
 // window rather than a scrolled document. shot.mjs keeps its own tall, full-page framing
 // for development; this one exists only for docs.
 //
-//   OUT=./assets node tools/shot-readme.mjs [http://127.0.0.1:8787]
+//   OUT=./assets node scripts/shot-readme.mjs [http://127.0.0.1:8787]
 //
 // Needs a running server and any Chromium (CHROME=... to point at one).
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
 // The README frame. 1280x720 is the HD default; deviceScaleFactor 1 keeps the file
@@ -154,6 +154,41 @@ await shot('model-picker-dark.png', { dark: true });
 // The numbers the README quotes come from here, so print them.
 console.log('picker note:', await evaluate(`document.querySelector('[data-js="model-picker-note"]').textContent`));
 console.log('rows:', await evaluate(`document.querySelectorAll('[data-js="model-picker-list"] .model-row').length`));
+
+// --- saved endpoints: the dialog with real rows --------------------------------
+// The store lives in the real home, so it is backed up first and restored at the end.
+// Seeding goes through the running server, which is also the only writer.
+const connFile = join(homedir(), '.config-reader', 'connections.json');
+const connBackup = existsSync(connFile) ? readFileSync(connFile, 'utf8') : null;
+const restoreConnections = () => {
+  try {
+    if (connBackup === null) rmSync(join(homedir(), '.config-reader'), { recursive: true, force: true });
+    else writeFileSync(connFile, connBackup);
+  } catch { /* the file is the user's; a failed restore must not mask the real error */ }
+};
+process.on('uncaughtException', e => { restoreConnections(); bail(e); });
+process.on('unhandledRejection', e => { restoreConnections(); bail(e); });
+
+// Close the picker, keep the editor open: Apply only exists where there is a form.
+await evaluate(`document.querySelector('[data-js="model-picker-close"]').click()`);
+await sleep(400);
+// One row, not two: at 1280x720 the dialog's list only has room for one full card, and
+// a README image that cuts the second card in half reads as a broken layout.
+await evaluate(`(async()=>{ await fetch('/api/connections',{method:'POST',headers:{'content-type':'application/json'},
+  body: JSON.stringify({ profiles: [
+    { name: 'ai.ka4.dev', baseUrl: 'https://ai.ka4.dev', model: 'kenari/deepseek-v4-1-flash', apiKey: 'sk-demo-for-the-shot' },
+  ] }) }); })()`);
+await evaluate(`document.querySelector('[data-js="connections-open"]').click()`);
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`document.querySelectorAll('[data-js="connections-list"] .conn').length === 1`)) break;
+  await sleep(250);
+}
+await sleep(500);
+await shot('connections-dark.png', { dark: true });
+console.log('connections rows:', await evaluate(`document.querySelectorAll('[data-js="connections-list"] .conn').length`));
+console.log('connections note:', await evaluate(`document.querySelector('[data-js="connections-note"]').textContent`));
+restoreConnections();
+
 console.log('page errors:', await evaluate(`JSON.stringify(window.__errs || [])`));
 
 ws.close();

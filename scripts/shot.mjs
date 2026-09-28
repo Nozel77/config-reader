@@ -1,7 +1,7 @@
 // Dev-only. Screenshots the real page through Chrome DevTools Protocol so layout
 // and wording can be looked at instead of guessed. No dependencies: node has a
 // global WebSocket, and any Chromium will do.
-//   OUT=./tools/shots node tools/shot.mjs [http://127.0.0.1:8787]
+//   OUT=./scripts/shots node scripts/shot.mjs [http://127.0.0.1:8787]
 import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -38,7 +38,7 @@ if (!CHROME) {
 console.log('browser:', CHROME);
 const URL_BASE = process.argv[2] || 'http://127.0.0.1:8787';
 const PORT = Number(process.env.CDP_PORT || 9333);
-const OUT = process.env.OUT || join(process.cwd(), 'tools', 'shots');
+const OUT = process.env.OUT || join(process.cwd(), 'scripts', 'shots');
 const profile = mkdtempSync(join(tmpdir(), 'cdp-'));
 
 const chrome = spawn(CHROME, [
@@ -298,8 +298,10 @@ await shot(join(OUT, '12-marker.png'), { full: false });
 
 // --- a non-Claude tool: three fields, patched into its own config format ------
 // Back to the landing first, then pick Codex from the tool cards. The switch guard
-// is a confirm(), which blocks a headless renderer until it is answered.
-await evaluate(`window.confirm = () => true; document.querySelector('[data-js="editor-back"]').click()`);
+// is the shared confirm dialog; answer it by clicking Discard.
+await evaluate(`document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(300);
+await evaluate(`(() => { const d = document.querySelector('[data-js="confirm"]'); if (d && d.open) document.querySelector('[data-js="confirm-ok"]').click(); })()`);
 await sleep(300);
 await shot(join(OUT, '13-landing-picker.png'), { full: false });
 const picked = await evaluate(`(()=>{
@@ -325,7 +327,9 @@ const simple = await evaluate(`JSON.stringify({
 console.log('codex editor:', simple);
 
 // --- Hermes: the default model plus the role slots it reads -------------------
-await evaluate(`window.confirm = () => true; document.querySelector('[data-js="editor-back"]').click()`);
+await evaluate(`document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(300);
+await evaluate(`(() => { const d = document.querySelector('[data-js="confirm"]'); if (d && d.open) document.querySelector('[data-js="confirm-ok"]').click(); })()`);
 await sleep(300);
 const pickedHermes = await evaluate(`(()=>{
   const card=[...document.querySelectorAll('.tool-card')].find(c=>c.textContent.includes('Hermes'));
@@ -431,6 +435,72 @@ console.log('after apply:', await evaluate(`JSON.stringify({
 await shot(join(OUT, '27-after-apply.png'), { full: false });
 // Put the store back the way it was found.
 restoreConnections();
+
+// --- the confirm dialog: Back on a dirty form asks before it drops the edits ----
+// The form is dirty from the apply above, so the guard fires; answer it and land.
+await evaluate(`document.querySelector('[data-js="editor-back"]').click()`);
+await sleep(400);
+console.log('confirm dialog:', await evaluate(`JSON.stringify({
+  open: document.querySelector('[data-js="confirm"]').open,
+  title: document.querySelector('[data-js="confirm-title"]').textContent,
+  ok: document.querySelector('[data-js="confirm-ok"]').textContent,
+})`));
+// The hover fill is the state the complaint was about, so both states are read back and
+// the footer is captured zoomed rather than trusting the token pair the gate covers.
+const okStyle = () => evaluate(`(()=>{const b=document.querySelector('[data-js="confirm-ok"]');const s=getComputedStyle(b);return JSON.stringify({bg:s.backgroundColor,fg:s.color,outline:s.outlineColor,focusVisible:b.matches(':focus-visible')});})()`);
+const okBox = JSON.parse(await evaluate(`(()=>{const r=document.querySelector('[data-js="confirm-ok"]').getBoundingClientRect();return JSON.stringify({x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)});})()`));
+await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 8, y: 8, buttons: 0 });
+await sleep(250);
+console.log('confirm ok at rest:', await okStyle());
+await shot(join(OUT, '28-confirm.png'), { full: false });
+const foot = JSON.parse(await evaluate(`(()=>{const r=document.querySelector('.confirm__foot').getBoundingClientRect();return JSON.stringify({x:r.x-6,y:r.y-6,width:r.width+12,height:r.height+12});})()`));
+const { data: zoom } = await cmd('Page.captureScreenshot', { format: 'png', clip: { ...foot, scale: 4 } });
+writeFileSync(join(OUT, '28c-confirm-zoom.png'), Buffer.from(zoom, 'base64'));
+await shot(join(OUT, '29-confirm-dark.png'), { full: false, dark: true });
+await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: okBox.x, y: okBox.y, buttons: 0 });
+await sleep(350);
+console.log('confirm ok hovered:', await okStyle());
+await shot(join(OUT, '28b-confirm-hover.png'), { full: false });
+await shot(join(OUT, '29b-confirm-hover-dark.png'), { full: false, dark: true });
+await evaluate(`document.querySelector('[data-js="confirm-ok"]').click()`);
+await sleep(500);
+console.log('after confirm:', await evaluate(`JSON.stringify({
+  editorOpen: !document.querySelector('[data-js="editor"]').hidden,
+  dialogOpen: document.querySelector('[data-js="confirm"]').open,
+})`));
+
+// --- the error toast: a model that cannot answer paints the red variant ---------
+// Real path, not a class swap: a bogus model id makes the probe fail, and the toast
+// reports it. The confirm section left us on the landing.
+await evaluate(`document.querySelectorAll('[data-js="tool-picker"] .tool-card')[0].click()`);
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
+  await sleep(250);
+}
+await sleep(300);
+await evaluate(`(() => {
+  const card = [...document.querySelectorAll('[data-js="editor-form"] .field-card')].find(f => f.getAttribute('data-card') === 'ANTHROPIC_MODEL');
+  const input = card.querySelector('input');
+  input.value = 'no-such-model-audit';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  card.querySelector('.field-card__test').click();
+})()`);
+for (let i = 0; i < 60; i++) {
+  if (!(await evaluate(`!!document.querySelector('.field-card__test--busy')`))) break;
+  await sleep(500);
+}
+console.log('error toast:', await evaluate(`JSON.stringify({
+  cls: document.querySelector('[data-js="toast"]').className,
+  text: document.querySelector('[data-js="toast"]').textContent.slice(0, 90),
+})`));
+await shot(join(OUT, '30-toast-error.png'), { full: false });
+// The same toast on a phone: centered at the top.
+await cmd('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 2, mobile: true });
+await sleep(250);
+console.log('toast on a phone:', await evaluate(`(()=>{const r=document.querySelector('[data-js="toast"]').getBoundingClientRect();return JSON.stringify({top:Math.round(r.top),left:Math.round(r.left),right:Math.round(r.right),vw:innerWidth});})()`));
+await shot(join(OUT, '31-toast-phone.png'), { full: false });
+await cmd('Emulation.clearDeviceMetricsOverride');
+await sleep(200);
 
 // --- console errors? ---
 const errs = await evaluate(`JSON.stringify(window.__errs||[])`);

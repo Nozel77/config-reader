@@ -1,20 +1,13 @@
 // Extracted from server.js: the whole selftest, so the server it exercises stays about
-// serving. Run it with `node tools/selftest.js`, or `node server.js --selftest`.
+// serving. Run it with `node scripts/selftest.js`, or `node server.js --selftest`.
 const {
   missing,
-  http,
   fs,
   path,
   os,
   HERE,
-  INDEX,
-  APP_TS,
   ICONS,
   configDir,
-  hermesHome,
-  codexHome,
-  opencodeDir,
-  MAX_BODY,
   appJs,
   detectEol,
   settingsFile,
@@ -23,70 +16,34 @@ const {
   hasBin,
   toolList,
   toolPaths,
-  PROVIDER,
-  PROVIDER_LABEL,
   scanInfo,
   readSettings,
   BACKUPS,
   backupBeforeWrite,
-  sleep,
   atomicWrite,
-  readText,
   withV1,
-  tomlString,
-  tomlUnquote,
   tomlTopValue,
-  tomlSectionValues,
   tomlSetTop,
   tomlSetSection,
-  tomlSetInSection,
-  codexKey,
   codexRead,
   codexWrite,
-  jsoncParse,
   opencodeRead,
   opencodeWrite,
-  HERMES_MODEL_RE,
-  HERMES_DELEGATION_RE,
-  HERMES_AUX_RE,
-  HERMES_ROLES,
-  hermesRoleRe,
-  hermesBlockValue,
   hermesRead,
-  hermesPatchBlock,
-  hermesBuildBlock,
-  hermesSetTopBlock,
-  hermesSetRole,
   hermesWrite,
   envVarSet,
-  readSimple,
-  writeSimple,
-  send,
-  isUp,
-  openBrowser,
-  originOk,
-  readBody,
-  jsonBody,
   modelsUrl,
   chatUrl,
   psQuote,
   vbsLauncher,
-  installShortcutWindows,
   execQuote,
   shQuote,
   installShortcutLinux,
   installShortcutMac,
   resolveDirArg,
   desktopDirWin,
-  installShortcut,
   modelWindows,
-  VISION_TRUE_TOKENS,
-  visionFromModalities,
-  VISION_BOOL_KEYS,
-  VISION_MOD_KEYS,
-  rowVision,
   modelVision,
-  num,
   modelCaps,
   connectionsFile,
   readConnections,
@@ -94,10 +51,7 @@ const {
   protectSecret,
   revealSecret,
   secretsAtRest,
-  handler,
-  main,
   stripTypeScriptTypes,
-  spawn,
   spawnSync,
 } = require('../server.js');
 // ------------------------------------------------------------------- selftest
@@ -221,14 +175,82 @@ function selftest() {
     listed.every(t => t.installed === hasBin(t.bin)),
     listed.map(t => `${t.id}:${t.installed}`).join(' '));
 
-  // 5. app.ts strips to something the browser can actually parse
+  // 5. the frontend: the entry strips, every import names a real module file, and
+  //    the types are gone. The full graph is parsed and run by check-ui.mjs — the
+  //    entry alone cannot be `new Function`-ed any more: it is an ES module now.
   try {
     const js = appJs();
-    new Function(js);
     ok('app.ts strips to valid JS', js.length > 1000, `${js.length} bytes`);
-    ok('types are gone from the output', !/\binterface Field\b/.test(js));
+    const fieldsSrc = fs.readFileSync(path.join(HERE, 'app', 'fields.ts'), 'utf8');
+    const fieldsJs = stripTypeScriptTypes(fieldsSrc, { mode: 'strip' });
+    ok('types are gone from the output', /\binterface Field\b/.test(fieldsSrc) && !/\binterface Field\b/.test(fieldsJs));
+    const missing = [];
+    const seenFiles = new Set();
+    const walk = file => {
+      if (seenFiles.has(file)) return;
+      seenFiles.add(file);
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/from\s+'(\.[^']+)'/g)) {
+        const f = path.join(path.dirname(file), m[1].replace(/\.js$/, '.ts'));
+        if (fs.existsSync(f)) walk(f); else missing.push(m[1]);
+      }
+    };
+    walk(path.join(HERE, 'app.ts'));
+    ok('every frontend import resolves to a module file', missing.length === 0 && seenFiles.size > 5,
+      missing.join(' ') || `${seenFiles.size} modules`);
   } catch (e) {
     ok('app.ts strips to valid JS', false, e.message);
+  }
+
+  // 6. every module imports the shared names it uses. A missing import is a runtime
+  //    ReferenceError in the browser, and the harness cannot see it — it concatenates
+  //    every module into one scope, so check-ui passes either way. This is the gate
+  //    for that class of bug.
+  try {
+    const appDir = path.join(HERE, 'app');
+    const files = fs.readdirSync(appDir).filter(f => f.endsWith('.ts')).map(f => path.join(appDir, f));
+    files.push(path.join(HERE, 'app.ts'));
+    const shared = new Set();
+    const byFile = new Map();
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const names = new Set([...src.matchAll(/^export\s+(?:const|let|function|async function|class)\s+(\w+)/gm)].map(m => m[1]));
+      byFile.set(file, names);
+      for (const n of names) shared.add(n);
+    }
+    const missed = [];
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const imported = new Set();
+      for (const m of src.matchAll(/\bimport\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s/g)) {
+        const brace = /\{([^}]*)\}/.exec(m[0]);
+        if (brace) for (const part of brace[1].split(',')) {
+          const n = part.trim().split(/\s+/)[0].replace(/^type\s+/, '');
+          if (n) imported.add(n);
+        }
+        const star = /\*\s+as\s+(\w+)/.exec(m[0]);
+        if (star) imported.add(star[1]);
+        const def = /\bimport\s+(\w+)\s+from/.exec(m[0]);
+        if (def) imported.add(def[1]);
+      }
+      const declared = new Set([...byFile.get(file), ...imported]);
+      for (const m of src.matchAll(/\b(?:const|let|var|function)\s+(\w+)/g)) declared.add(m[1]);
+      // Strings, comments and template-literal prose are not uses; a template's
+      // ${...} interpolations are kept, because those are real expressions.
+      // Object keys and type annotations (`tools:`, `values?:`) are not uses either.
+      const code = src
+        .replace(/'[^'\n]*'/g, "''")
+        .replace(/"[^"\n]*"/g, '""')
+        .replace(/`([^`]*)`/g, (m, body) => (body.match(/\$\{[^}]*\}/g) || []).join(' '))
+        .replace(/\/\/[^\n\r]*/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const name of shared) {
+        if (declared.has(name)) continue;
+        if (new RegExp(`(?:^|[^\\w.$])${name}(?![\\w.$:?])`).test(code)) missed.push(`${path.basename(file)}:${name}`);
+      }
+    }
+    ok('every frontend module imports the shared names it uses', missed.length === 0, missed.join(' ') || `${shared.size} shared names`);
+  } catch (e) {
+    ok('every frontend module imports the shared names it uses', false, e.message);
   }
 
   // 6. EOL is detected per file, not assumed from the platform. Claude Code writes
@@ -509,9 +531,9 @@ function selftest() {
   // The +x bit is a POSIX concept; on Windows chmod can only touch the read-only
   // flag, so the mode is checked where it means something and the source where it
   // does not. Either way the chmodSync call itself is asserted — and it is asserted
-  // in server.js, which is where installShortcutLinux now lives: reading __filename
-  // here would only ever search this test file.
-  const shortcutSrc = fs.readFileSync(path.join(HERE, 'server.js'), 'utf8');
+  // in lib/shortcut.js, which is where installShortcutLinux now lives: reading
+  // __filename here would only ever search this test file.
+  const shortcutSrc = fs.readFileSync(path.join(HERE, 'lib', 'shortcut.js'), 'utf8');
   ok('linux: the launcher is chmod +x', process.platform === 'win32'
     ? /installShortcutLinux[\s\S]*?chmodSync\(file, 0o755\)/.test(shortcutSrc)
     : (fs.statSync(linuxFile).mode & 0o111) !== 0,
@@ -540,8 +562,6 @@ function selftest() {
     gateSrc.includes("typeof stripTypeScriptTypes !== 'function'") && !/NODE_MAJOR\s*<\s*22/.test(gateSrc));
   ok('the gate names the required minor version when it fails', gateSrc.includes('22.13'));
 
-  // 14. the Desktop the shortcut lands in. On Windows the registry is the only
-  // 14. the Desktop the shortcut lands in. On Windows the registry is the only
   // 14. the Desktop the shortcut lands in. On Windows the registry is the only
   // authoritative answer — a OneDrive-redirected Desktop is where the user actually
   // looks, while ~/Desktop can still exist as a stale folder. That stale folder is
@@ -783,6 +803,14 @@ function selftest() {
   ok('the store round-trips', connBack.profiles.length === 2 && connBack.profiles[0].name === 'local', JSON.stringify(connBack.profiles));
   ok('a stored key is read back with its marker', connBack.profiles[1].apiKey === 'sk-secret' && connBack.profiles[1].enc === 'plain');
 
+  writeConnections([
+    { name: 'zebra', baseUrl: 'https://z.example', model: '' },
+    { name: 'alpha', baseUrl: 'https://a.example', model: '' },
+  ]);
+  ok('the store is written sorted by name',
+    readConnections().profiles.map(r => r.name).join() === 'alpha,zebra',
+    readConnections().profiles.map(r => r.name).join());
+
   fs.writeFileSync(connectionsFile(), '{ this is not json');
   ok('a broken store reads as empty rather than throwing', readConnections().profiles.length === 0);
   ok('a broken store is reported as existing', readConnections().exists === true);
@@ -815,6 +843,23 @@ function selftest() {
   const portSrc = fs.readFileSync(path.join(HERE, 'server.js'), 'utf8');
   ok('a bad --port is refused with a sentence, not a stack trace',
     /Number\.isInteger\(port\)/.test(portSrc) && portSrc.includes('is not a usable port'));
+
+  // 15b. a browser launcher that is not installed must not take the server with it.
+  // xdg-open is absent on a bare WSL image, and spawn reports that asynchronously as
+  // an 'error' event — unhandled, it kills the process. The convenience of opening a
+  // tab is never worth the editor. Run in a child so a regression cannot end this run.
+  const launcherSrc = fs.readFileSync(path.join(HERE, 'lib', 'http.js'), 'utf8');
+  ok('openBrowser attaches an error handler to the spawned launcher',
+    /child\.on\('error'/.test(launcherSrc), launcherSrc.includes("on('error'") ? '' : 'no error listener found');
+  // Platform-agnostic: a nonexistent binary behaves the same everywhere, and this is
+  // the shape openBrowser uses on every platform.
+  const launchProbe = spawnSync(process.execPath, ['-e',
+    "const {spawn}=require('node:child_process');"
+    + "const c=spawn('csui-not-a-real-launcher-xyz',['http://127.0.0.1:1'],{detached:true,stdio:'ignore'});"
+    + "c.on('error',()=>{});c.unref();setTimeout(()=>console.log('alive'),600);"],
+    { encoding: 'utf8', timeout: 8000 });
+  ok('a missing launcher leaves the process alive', (launchProbe.stdout || '').includes('alive'),
+    `exit ${launchProbe.status}, stderr ${(launchProbe.stderr || '').trim().split('\n')[0] || '(none)'}`);
 
   for (const c of checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}${c.detail ? `  (${c.detail})` : ''}`);
   const failed = checks.filter(c => !c.pass).length;

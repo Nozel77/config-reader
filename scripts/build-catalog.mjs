@@ -1,5 +1,5 @@
 // Dev-only. Regenerates catalog.json. Not part of runtime.
-//   node tools/build-catalog.mjs
+//   node scripts/build-catalog.mjs
 // Sources: docs settings-reference (231 keys + scope + category) merged with
 // schemastore (type/enum/default for the 142 it knows). Docs win on description.
 import { writeFileSync } from 'node:fs';

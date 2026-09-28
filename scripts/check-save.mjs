@@ -3,7 +3,7 @@
 // The server edits exactly one file — <CLAUDE_CONFIG_DIR>/settings.json — so this
 // launches its own server with CLAUDE_CONFIG_DIR pointed at a temp directory. The
 // user's real ~/.claude/settings.json is never in scope, by construction.
-//   node tools/check-save.mjs
+//   node scripts/check-save.mjs
 import { writeFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';

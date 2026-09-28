@@ -1,0 +1,16 @@
+{
+  // Editors only: the app has no build step and the server strips types at runtime.
+  // Without this an editor infers its own libs and typings and reports errors the app
+  // does not have; with it, the app/x.js specifiers resolve to their app/x.ts sources.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": [],
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["app.ts", "app/**/*.ts"]
+}
