@@ -1217,7 +1217,10 @@ ok('the sidebar back button lands on the picker, not the previous tool',
 
 // ---- saved endpoints -------------------------------------------------------
 // A second dialog, on the same rules as the model picker: it fills the form, it never
-// writes, and a token only travels when a row is applied.
+// writes, and a token only travels when a row is applied. The block above ended on the
+// picker, so open a tool first: Apply is only offered where there is a form to fill.
+hook('tool-picker').children[0].fire('click');
+await settle();
 ok('the rail offers the saved endpoints', !!hook('connections-open'));
 ok('the dialog starts closed', hook('connections').open !== true);
 ok('nothing was fetched before it was opened', connGets === 0, `${connGets} reads`);
@@ -1240,6 +1243,7 @@ ok('a row with a stored key says so', hook('connections-list').querySelectorAll(
 api.setEnv('ANTHROPIC_BASE_URL', '');
 api.setEnv('ANTHROPIC_MODEL', '');
 api.setEnv('ANTHROPIC_AUTH_TOKEN', '');
+const postsBeforeApply = posted.length;   // earlier blocks in this suite save too
 const applyBtns = hook('connections-list').querySelectorAll('.conn__apply');
 ok('every row offers Apply while a tool is open', applyBtns.length === 2, `${applyBtns.length} buttons`);
 if (applyBtns.length) {
@@ -1250,7 +1254,7 @@ ok('apply asks the server for that one row\'s token', !!revealed && revealed.nam
 ok('apply fills the base URL', api.env().ANTHROPIC_BASE_URL === 'http://localhost:20128', api.env().ANTHROPIC_BASE_URL);
 ok('apply fills the token', api.env().ANTHROPIC_AUTH_TOKEN === 'sk-from-store');
 ok('apply closes the dialog', hook('connections').open !== true);
-ok('apply never wrote a config', posted.length === 0, `${posted.length} posts`);
+ok('apply never wrote a config', posted.length === postsBeforeApply, `${posted.length - postsBeforeApply} posts`);
 ok('apply marks the form dirty, so Save is the write',
   hook('actionbar-dot').className.includes('actionbar__dot--dirty'), hook('actionbar-dot').className);
 

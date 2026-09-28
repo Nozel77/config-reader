@@ -217,6 +217,39 @@ let modelError = '';                      // '' | the endpoint's reason | a fetc
 let modelsUrl = '';                       // the URL the list came from, for the note
 let loadedFor = '';                       // base URL + token the list was read with
 
+// A saved endpoint: the three values every tool asks for, typed once. `hasKey` is
+// what the server said — the token itself is fetched per row, on Apply, and never
+// rides the list reply.
+interface Connection { name: string; baseUrl: string; model: string; hasKey?: boolean }
+interface ConnectionsResponse {
+  file?: string; exists?: boolean; atRest?: boolean;
+  profiles?: Connection[]; error?: string;
+}
+
+let conns: Connection[] = [];     // the working copy the dialog edits
+let connsLoaded = false;          // a reply has arrived at least once
+let connsDirty = false;           // the working copy differs from the file
+let connsError = '';              // the server's sentence, when a call failed
+let connsAtRest = false;          // whether the server encrypts the token
+let connsFile = '';               // where the store lives, for the note
+
+// The form keys that hold the endpoint, per mode. Claude Code names them
+// ANTHROPIC_*, the other three are patched through baseUrl/apiKey/model.
+const connKeys = (): { base: string; key: string; model: string } => (tool.mode === 'simple'
+  ? { base: 'baseUrl', key: 'apiKey', model: 'model' }
+  : { base: 'ANTHROPIC_BASE_URL', key: 'ANTHROPIC_AUTH_TOKEN', model: 'ANTHROPIC_MODEL' });
+
+// Does this saved endpoint describe what the form holds right now? Derived, never
+// stored: a stored flag would go stale the moment the form is edited by hand.
+function connMatches(c: Connection): boolean {
+  const k = connKeys();
+  const e = env();
+  const url = (c.baseUrl || '').trim();
+  if (!url || url !== (e[k.base] || '').trim()) return false;
+  const m = (c.model || '').trim();
+  return !m || stripMarker(m) === stripMarker(e[k.model] || '');
+}
+
 // Elements are found by their data-js hook, never by a CSS class, so renaming a
 // class for styling can never break behaviour.
 const $ = (name: string): HTMLElement =>
@@ -440,7 +473,7 @@ const toolFromUrl = (): Tool | null => {
 // say one tool while the screen shows another.
 function openTool(t: Tool, keepUrl = false): void {
   if (t.id === tool.id && opened) return;
-  if (dirty && !confirm('Discard unsaved changes and open another tool?')) {
+  if ((dirty || connectionsOpen()) && !confirm('Discard unsaved changes and open another tool?')) {
     if (keepUrl) history.pushState({ tool: tool.id }, '', `#${tool.id}`);
     return;
   }
@@ -453,7 +486,7 @@ function openTool(t: Tool, keepUrl = false): void {
 addEventListener('popstate', () => {
   const t = toolFromUrl();
   if (t) { openTool(t, true); return; }
-  if (dirty && !confirm('Discard unsaved changes and go back to the tool list?')) {
+  if ((dirty || connectionsOpen()) && !confirm('Discard unsaved changes and go back to the tool list?')) {
     history.pushState({ tool: tool.id }, '', `#${tool.id}`);
     return;
   }
@@ -631,14 +664,16 @@ function closePicker(): void {
 // A click that lands outside the panel closes it. Anything inside the panel is not a
 // dismissal, and a keyboard or synthetic click carries no coordinates at all — so the
 // target is what decides, and the box only separates the dialog's own padding from the
-// backdrop behind it.
-function onPickerClick(e: MouseEvent): void {
-  const dlg = $('model-picker');
-  if (e.target !== dlg) return;
-  const r = dlg.getBoundingClientRect();
-  const inside = e.clientX >= r.left && e.clientX <= r.right
-    && e.clientY >= r.top && e.clientY <= r.bottom;
-  if (!inside) closePicker();
+// backdrop behind it. One handler, both dialogs.
+function outsideClick(hookName: string, close: () => void): (e: MouseEvent) => void {
+  return (e: MouseEvent) => {
+    const dlg = $(hookName);
+    if (e.target !== dlg) return;
+    const r = dlg.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right
+      && e.clientY >= r.top && e.clientY <= r.bottom;
+    if (!inside) close();
+  };
 }
 
 // The capability icons for one model: one glyph per boolean the endpoint reported as
@@ -1149,6 +1184,214 @@ function initTheme(): void {
   } catch { /* older browsers */ }
 }
 
+// ------------------------------------------------------------- connections
+
+function connInput(i: number, field: keyof Connection): HTMLInputElement | null {
+  return document.querySelector(`[data-conn="${i}:${field}"]`) as HTMLInputElement | null;
+}
+
+const connectionsOpen = (): boolean =>
+  (($('connections') as unknown as HTMLDialogElement).open === true);
+
+// One row is one endpoint: its name, then the three values. The name is a field like
+// any other, so nothing has to be re-rendered while it is being typed.
+function connRow(c: Connection, i: number): HTMLElement {
+  const field = (key: keyof Connection, label: string, kind: 'text' | 'secret', placeholder = ''): HTMLElement => {
+    const input = el('input', {
+      class: 'conn__input',
+      type: kind === 'secret' ? 'password' : 'text',
+      'data-conn': `${i}:${key}`,
+      value: (c[key] as string) || '',
+      placeholder,
+      spellcheck: 'false',
+      autocomplete: kind === 'secret' ? 'off' : '',
+      'aria-label': `${label} for ${c.name || 'this endpoint'}`,
+      oninput: (e: Event) => {
+        (c[key] as string) = (e.target as HTMLInputElement).value;
+        connsDirty = true;
+        connsError = '';
+        ($('connections-save') as HTMLButtonElement).disabled = false;
+      },
+    }) as HTMLInputElement;
+    const row = el('div', { class: 'conn__row' }, input);
+    if (kind === 'secret') {
+      const eye = el('button', {
+        class: 'button button--ghost button--icon button--small', type: 'button',
+        title: 'reveal the token', 'aria-label': 'Show token',
+        onclick: () => {
+          const shown = input.type === 'password';
+          input.type = shown ? 'text' : 'password';
+          eye.replaceChildren(icon(shown ? 'eyeSlash' : 'eye'));
+        },
+      }, icon('eye'));
+      row.append(eye);
+    }
+    return el('label', { class: 'conn__field' }, el('span', { class: 'conn__label', text: label }), row);
+  };
+
+  const badges: HTMLElement[] = [];
+  if (c.hasKey) {
+    badges.push(el('span', {
+      class: 'badge badge--ok', text: 'key stored',
+      title: connsAtRest ? 'encrypted at rest' : 'stored as plain text',
+    }));
+  } else {
+    badges.push(el('span', { class: 'badge', text: 'no key' }));
+  }
+  // Only worth saying when a tool is open and the endpoint is not the one in the form.
+  if (opened && connMatches(c)) badges.push(el('span', { class: 'badge badge--ok', text: 'in the form' }));
+
+  const apply = el('button', {
+    class: 'button button--ghost button--small conn__apply', type: 'button',
+    title: `Fill ${tool.name}'s form from this endpoint`,
+    'aria-label': `Apply ${c.name || 'this endpoint'} to ${tool.name}`,
+  }, 'Apply') as HTMLButtonElement;
+  apply.addEventListener('click', () => { void applyConnection(c, apply); });
+
+  return el('section', { class: 'conn', 'data-conn-row': String(i) },
+    el('div', { class: 'conn__top' },
+      field('name', 'Name', 'text', 'local gateway'),
+      ...badges,
+      el('button', {
+        class: 'button button--ghost button--icon button--small button--danger', type: 'button',
+        title: `delete ${c.name || 'this endpoint'}`, 'aria-label': `Delete ${c.name || 'this endpoint'}`,
+        onclick: () => {
+          conns.splice(i, 1);
+          connsDirty = true;
+          renderConnections();
+          ($('connections-save') as HTMLButtonElement).disabled = false;
+        },
+      }, icon('trash'))),
+    field('baseUrl', 'Base URL', 'text', 'http://localhost:20128'),
+    field('model', 'Model', 'text', 'provider/model-id'),
+    field('apiKey', 'Token', 'secret', c.hasKey ? 'leave empty to keep the stored key' : 'paste the token'),
+    opened ? apply : null);
+}
+
+function renderConnections(): void {
+  const list = $('connections-list');
+  $('connections-sub').textContent = opened
+    ? `Apply fills ${tool.name}'s form. Save is what writes the file.`
+    : 'Open a tool to apply one of these to its form.';
+  $('connections-count').textContent = conns.length ? `${conns.length} saved` : '';
+  const note = $('connections-note');
+  note.classList.toggle('note--error', !!connsError);
+  note.textContent = connsError || (connsLoaded && connsFile
+    ? `${connsAtRest ? 'Tokens are encrypted with DPAPI for this Windows account' : 'Tokens are stored as plain text'} in ${prettyPath(connsFile)}.`
+    : '');
+
+  if (!connsLoaded) {
+    list.replaceChildren(el('div', { class: 'loading' },
+      el('span', { class: 'loading__spinner' }), 'Reading the saved endpoints…'));
+    return;
+  }
+  if (!conns.length) {
+    list.replaceChildren(el('div', { class: 'empty-state' },
+      el('b', { class: 'empty-state__title', text: 'No saved endpoints yet' }),
+      'Add one, and the base URL, token and default model are typed once instead of once per tool.'));
+    return;
+  }
+  list.replaceChildren(...conns.map(connRow));
+}
+
+async function loadConnections(): Promise<void> {
+  // Reopening the dialog must not throw away a row the user is halfway through.
+  if (connsDirty) { renderConnections(); return; }
+  connsLoaded = false;
+  connsError = '';
+  renderConnections();
+  try {
+    const r = await fetch('/api/connections');
+    const j: ConnectionsResponse = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    conns = (j.profiles || []).map(p => ({
+      name: p.name || '', baseUrl: p.baseUrl || '', model: p.model || '', hasKey: !!p.hasKey,
+    }));
+    connsAtRest = !!j.atRest;
+    connsFile = j.file || '';
+    connsDirty = false;
+  } catch (e) {
+    conns = [];
+    connsError = `could not read the saved endpoints: ${(e as Error).message}`;
+  }
+  connsLoaded = true;   // an error shows as a note, not as a spinner that never stops
+  renderConnections();
+}
+
+function openConnections(): void {
+  const dlg = $('connections') as unknown as HTMLDialogElement;
+  if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
+  void loadConnections();
+}
+
+function closeConnections(): void {
+  const dlg = $('connections') as unknown as HTMLDialogElement;
+  if (typeof dlg.close === 'function') dlg.close(); else dlg.removeAttribute('open');
+}
+
+// Fill the form from one endpoint. The token is asked for by name, one row at a time,
+// and nothing here writes a config — Save is still the only writer.
+async function applyConnection(c: Connection, btn: HTMLButtonElement): Promise<void> {
+  if (!opened) return;
+  if (dirty && !confirm('Discard the unsaved changes in the form and fill it from this endpoint?')) return;
+  const k = connKeys();
+  btn.disabled = true;
+  btn.classList.add('button--busy');
+  let apiKey = '';
+  try {
+    if (c.hasKey) {
+      const r = await fetch('/api/connections/reveal', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: c.name }),
+      });
+      const j: { apiKey?: string; error?: string } = await r.json();
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      apiKey = j.apiKey || '';
+    }
+  } catch (e) {
+    connsError = `could not read the stored token: ${(e as Error).message}`;
+    renderConnections();
+    return;
+  } finally {
+    btn.classList.remove('button--busy');
+    btn.disabled = false;
+  }
+  setEnv(k.base, c.baseUrl);
+  // A model picked from a gateway may carry Claude Code's [1m] marker; the other three
+  // tools read the bare id.
+  if (c.model) setEnv(k.model, stripMarker(c.model));
+  if (apiKey) setEnv(k.key, apiKey);
+  connsDirty = false;
+  closeConnections();
+  // The dialog covered the form, so a full redraw is invisible here.
+  render();
+  toast(`filled from ${c.name} — Save writes it to ${tool.name}`);
+}
+
+async function saveConnections(): Promise<void> {
+  const btn = $('connections-save') as HTMLButtonElement;
+  btn.disabled = true;
+  btn.classList.add('button--busy');
+  try {
+    const r = await fetch('/api/connections', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ profiles: conns }),
+    });
+    const j: { error?: string; count?: number } = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    connsDirty = false;
+    connsError = '';
+    toast(`saved ${j.count} endpoint${j.count === 1 ? '' : 's'}`);
+    await loadConnections();
+  } catch (e) {
+    connsError = `not saved: ${(e as Error).message}`;
+    renderConnections();
+  } finally {
+    btn.classList.remove('button--busy');
+    btn.disabled = !connsDirty;
+  }
+}
+
 // ---------------------------------------------------------------- wire up
 
 // Reload runs from the editor, so a failure belongs in its banners, not the rail note.
@@ -1209,7 +1452,7 @@ $('model-picker-reload').addEventListener('click', () => { void loadModels(true)
 $('model-picker-close').addEventListener('click', closePicker);
 
 // A click outside the panel closes it.
-$('model-picker').addEventListener('click', onPickerClick);
+$('model-picker').addEventListener('click', outsideClick('model-picker', closePicker));
 
 $('model-picker-filter').addEventListener('input', (e: Event) => {
   filter = (e.target as HTMLInputElement).value;
@@ -1281,8 +1524,37 @@ $('stop-server').addEventListener('click', () => {
 initTheme();
 $('model-picker-close').append(icon('xmark'));
 $('model-picker-reload').append(icon('refresh'));
+$('connections-close').append(icon('xmark'));
 $('to-top').append(icon('arrowUp'));
 $('stop-server').prepend(icon('power'));
+$('connections-open').addEventListener('click', openConnections);
+$('connections-close').addEventListener('click', () => {
+  if (connsDirty && !confirm('Discard the unsaved endpoints?')) return;
+  connsDirty = false;
+  closeConnections();
+});
+// Escape closes a dialog without asking. This editor never throws a typed token away
+// silently, so the cancel is intercepted and the confirm decides.
+$('connections').addEventListener('cancel', (e: Event) => {
+  e.preventDefault();
+  if (connsDirty && !confirm('Discard the unsaved endpoints?')) return;
+  connsDirty = false;
+  closeConnections();
+});
+$('connections').addEventListener('click', outsideClick('connections', () => {
+  if (connsDirty && !confirm('Discard the unsaved endpoints?')) return;
+  connsDirty = false;
+  closeConnections();
+}));
+$('connections-new').addEventListener('click', () => {
+  conns.push({ name: '', baseUrl: '', model: '', hasKey: false });
+  connsDirty = true;
+  connsError = '';
+  renderConnections();
+  ($('connections-save') as HTMLButtonElement).disabled = false;
+  connInput(conns.length - 1, 'name')?.focus();
+});
+$('connections-save').addEventListener('click', () => { void saveConnections(); });
 renderTools();
 void loadTools();
 onScroll();
