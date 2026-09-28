@@ -577,6 +577,115 @@ function writeSimple(tool, paths, values) {
   }
   return text;
 }
+// ---------------------------------------------------------------- connections
+
+// Saved endpoints: the three values every tool asks for — base URL, token, default
+// model — typed once and applied to any tool's form. One file, under the home dir so
+// a re-clone does not take the tokens with it. The path is derived here; the browser
+// never sends one, the same rule every other path in this file follows.
+const CONNECTIONS_MAX = 50;
+const connectionsFile = () => path.join(os.homedir(), '.config-reader', 'connections.json');
+
+// A token at rest. On Windows, DPAPI through the PowerShell that ships with the OS:
+// no native module, no build step, and a blob only this user on this machine can
+// open. Everywhere else there is no OS key store this project can reach without a
+// dependency, so the token is stored plainly — the same as the config files it is
+// copied into. `enc: 'dpapi'` in the file is what says which one a row is.
+// ponytail: DPAPI protects a copied file, not a process running as this user.
+// macOS Keychain / libsecret are the upgrade path, as one optional dependency.
+const DPAPI_PROTECT = '$t = [Console]::In.ReadToEnd();'
+  + ' ConvertTo-SecureString -String $t -AsPlainText -Force | ConvertFrom-SecureString | Write-Output';
+const DPAPI_UNPROTECT = '$h = [Console]::In.ReadToEnd().Trim();'
+  + ' [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR((ConvertTo-SecureString $h))) | Write-Output';
+
+// The secret travels over stdin, never in the command line: argv is readable by any
+// process that can list command lines, and a token is not worth that.
+function dpapi(script, input) {
+  const r = spawnSync('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', windowsHide: true, input, timeout: 10000 });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error((r.stderr || 'powershell failed').trim().split('\n')[0]);
+  return (r.stdout || '').trim();
+}
+
+const secretsAtRest = () => process.platform === 'win32';
+
+function protectSecret(plain) {
+  if (!plain || !secretsAtRest()) return { apiKey: plain, enc: 'plain' };
+  try {
+    return { apiKey: dpapi(DPAPI_PROTECT, plain), enc: 'dpapi' };
+  } catch {
+    // Losing the token the user just typed is worse than storing it plainly.
+    return { apiKey: plain, enc: 'plain' };
+  }
+}
+
+// '' keyError means the value is usable; a message means the blob cannot be opened
+// here (another machine, another account) and the UI must say so rather than apply
+// an empty token.
+function revealSecret(enc, value) {
+  if (!value) return { apiKey: '', keyError: '' };
+  if (enc !== 'dpapi') return { apiKey: value, keyError: '' };
+  try {
+    return { apiKey: dpapi(DPAPI_UNPROTECT, value), keyError: '' };
+  } catch {
+    return { apiKey: '', keyError: 'stored on another machine or user account — re-enter the token' };
+  }
+}
+
+// What a connection is: a name to recognise it by, and the three values. Everything
+// else is dropped, so a client cannot park extra keys in the store.
+const cleanConnection = row => {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const name = str(row.name).trim().slice(0, 60);
+  const baseUrl = str(row.baseUrl).trim().slice(0, 300);
+  const model = str(row.model).trim().slice(0, 200);
+  let ok = false;
+  try { const u = new URL(baseUrl); ok = u.protocol === 'http:' || u.protocol === 'https:'; } catch { /* not a URL */ }
+  if (!name || !ok) return null;
+  return { name, baseUrl, model };
+};
+
+// A row as the file holds it: the three values plus the stored secret and how it was
+// stored. `enc` is read from the file only — a client never gets to claim one.
+const cleanConnectionRow = row => {
+  const base = cleanConnection(row);
+  if (!base) return null;
+  return { ...base, apiKey: str(row.apiKey), enc: str(row.enc) || 'plain' };
+};
+
+// Never throws: a missing file is the first-run case, and a hand-broken one must not
+// take the page down with it. A store that will not parse reads as empty, and the
+// first save writes it properly.
+function readConnections() {
+  let raw = null;
+  try { raw = fs.readFileSync(connectionsFile(), 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (raw === null) return { exists: false, profiles: [] };
+  try {
+    const doc = JSON.parse(stripBom(raw));
+    const list = Array.isArray(doc && doc.profiles) ? doc.profiles : [];
+    return { exists: true, profiles: list.map(cleanConnectionRow).filter(Boolean).slice(0, CONNECTIONS_MAX) };
+  } catch {
+    return { exists: true, profiles: [] };
+  }
+}
+
+function writeConnections(profiles) {
+  const doc = {
+    version: 1,
+    profiles: profiles.map(cleanConnectionRow).filter(Boolean).slice(0, CONNECTIONS_MAX),
+  };
+  atomicWrite(connectionsFile(), `${JSON.stringify(doc, null, 2)}\n`);
+  // POSIX only. On Windows chmod flips one read-only bit and does nothing else — the
+  // measured answer is 666 either way — so this is a real restriction on Linux/WSL/
+  // macOS and a no-op here. The Windows answer is DPAPI, below.
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(connectionsFile(), 0o600); } catch { /* best effort */ }
+  }
+  return doc;
+}
+
 // ---------------------------------------------------------------- http helpers
 
 const send = (res, status, body, type = 'application/json; charset=utf-8') => {
@@ -1441,6 +1550,16 @@ module.exports = {
   modelVision,
   num,
   modelCaps,
+  CONNECTIONS_MAX,
+  connectionsFile,
+  dpapi,
+  secretsAtRest,
+  protectSecret,
+  revealSecret,
+  cleanConnection,
+  cleanConnectionRow,
+  readConnections,
+  writeConnections,
   handler,
   main,
 };

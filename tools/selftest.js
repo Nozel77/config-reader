@@ -761,6 +761,52 @@ function selftest() {
     JSON.stringify(readConnections()) === JSON.stringify({ exists: false, profiles: [] }),
     JSON.stringify(readConnections()));
 
+  // 14c. the store's own rules: what a row is, what it drops, and what a hand-broken
+  // file does. The store path is derived from os.homedir() at call time, so pointing
+  // the home env at a scratch dir is what keeps the real one out of scope.
+  const connDir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-conn-'));
+  const savedHomeEnv = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = connDir;
+  ok('the store follows the home dir it is given',
+    connectionsFile() === path.join(connDir, '.config-reader', 'connections.json'), connectionsFile());
+
+  const wrote = writeConnections([
+    { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a', extra: 'nope' },
+    { name: 'nope', baseUrl: 'not a url', model: 'x' },
+    { name: 'with key', baseUrl: 'https://ai.example', model: '', apiKey: 'sk-secret', enc: 'plain' },
+  ]);
+  ok('a row with no usable URL is dropped, not stored', wrote.profiles.length === 2, String(wrote.profiles.length));
+  ok('the store is written as JSON with a version', JSON.parse(fs.readFileSync(connectionsFile(), 'utf8')).version === 1);
+  ok('an unknown field never reaches the file', !fs.readFileSync(connectionsFile(), 'utf8').includes('"extra"'));
+  const connBack = readConnections();
+  ok('the store round-trips', connBack.profiles.length === 2 && connBack.profiles[0].name === 'local', JSON.stringify(connBack.profiles));
+  ok('a stored key is read back with its marker', connBack.profiles[1].apiKey === 'sk-secret' && connBack.profiles[1].enc === 'plain');
+
+  fs.writeFileSync(connectionsFile(), '{ this is not json');
+  ok('a broken store reads as empty rather than throwing', readConnections().profiles.length === 0);
+  ok('a broken store is reported as existing', readConnections().exists === true);
+
+  // 14d. the token at rest. On Windows the store is a DPAPI blob that only this user
+  // on this machine can open; everywhere else there is no key store in reach, so the
+  // token is plain and the file mode is the only restriction.
+  const prot = protectSecret('sk-test-123');
+  if (secretsAtRest()) {
+    ok('windows: a token is stored as a dpapi blob',
+      prot.enc === 'dpapi' && /^[0-9a-f]+$/i.test(prot.apiKey), `${prot.enc} len ${prot.apiKey.length}`);
+    ok('windows: the blob opens back to the token', revealSecret(prot.enc, prot.apiKey).apiKey === 'sk-test-123');
+    ok('windows: a foreign blob is refused with a sentence, not an empty token',
+      (() => { const r = revealSecret('dpapi', '00'.repeat(278)); return r.apiKey === '' && /re-enter/.test(r.keyError); })());
+  } else {
+    ok(`${process.platform}: no key store is used, so the token is stored plainly`,
+      prot.enc === 'plain' && prot.apiKey === 'sk-test-123');
+    ok(`${process.platform}: a plain row reads back as itself`, revealSecret('plain', 'sk-x').apiKey === 'sk-x');
+  }
+  ok('an empty secret is not encrypted at all', protectSecret('').enc === 'plain' && protectSecret('').apiKey === '');
+
+  if (savedHomeEnv.USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedHomeEnv.USERPROFILE;
+  if (savedHomeEnv.HOME === undefined) delete process.env.HOME; else process.env.HOME = savedHomeEnv.HOME;
+  fs.rmSync(connDir, { recursive: true, force: true });
+
   // 15. the port guard. `--port abc` reached net.listen as NaN and surfaced as a raw
   // RangeError stack; start.cmd now pauses on a non-zero exit, which would park that
   // stack in front of a double-clicking user. Asserted against the source, since the
