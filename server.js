@@ -1144,6 +1144,69 @@ async function handler(req, res, port) {
     return send(res, 200, JSON.stringify({ tools: toolList() }));
   }
 
+  // The saved endpoints. One file for every tool, path derived server-side. The list
+  // reply carries no token at all: a key is handed out one row at a time, by name,
+  // and only when Apply asks for it.
+  if (req.method === 'GET' && p === '/api/connections') {
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    const { exists, profiles } = readConnections();
+    return send(res, 200, JSON.stringify({
+      file: connectionsFile(), exists, atRest: secretsAtRest(),
+      profiles: profiles.map(r => ({ name: r.name, baseUrl: r.baseUrl, model: r.model, hasKey: !!r.apiKey })),
+    }));
+  }
+
+  if (req.method === 'POST' && p === '/api/connections') {
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    const payload = await jsonBody(req, res);
+    if (!payload) return;
+    const rows = Array.isArray(payload.profiles) ? payload.profiles : null;
+    if (!rows) return send(res, 400, JSON.stringify({ error: 'profiles must be an array' }));
+    if (rows.length > CONNECTIONS_MAX) {
+      return send(res, 400, JSON.stringify({ error: `at most ${CONNECTIONS_MAX} connections` }));
+    }
+    // A row that arrives without a key keeps the one already stored under that name,
+    // so editing a URL or a model never means retyping the token.
+    const stored = new Map(readConnections().profiles.map(r => [r.name, r]));
+    const out = [];
+    for (const row of rows) {
+      const clean = cleanConnection(row);
+      if (!clean) {
+        const said = str(row && row.name);
+        return send(res, 400, JSON.stringify({ error: `a connection needs a name and an http(s) Base URL (got ${JSON.stringify(said)})` }));
+      }
+      if (out.some(r => r.name.toLowerCase() === clean.name.toLowerCase())) {
+        return send(res, 400, JSON.stringify({ error: `two connections are named "${clean.name}"` }));
+      }
+      const typed = str(row.apiKey);
+      const kept = stored.get(clean.name);
+      const secret = typed ? protectSecret(typed)
+        : kept && kept.apiKey ? { apiKey: kept.apiKey, enc: kept.enc }
+        : { apiKey: '', enc: 'plain' };
+      out.push({ ...clean, ...secret });
+    }
+    let doc;
+    try { doc = writeConnections(out); } catch (e) {
+      return send(res, 500, JSON.stringify({ error: `write failed: ${e.code || e.message}` }));
+    }
+    // Never the values — one of them is a live token.
+    console.log(`wrote ${connectionsFile()} (${doc.profiles.length} connections)`);
+    return send(res, 200, JSON.stringify({ ok: true, file: connectionsFile(), count: doc.profiles.length }));
+  }
+
+  // The token for one row, by name. Apply is the only caller.
+  if (req.method === 'POST' && p === '/api/connections/reveal') {
+    if (!originOk(req, port)) return send(res, 403, JSON.stringify({ error: 'bad origin' }));
+    const payload = await jsonBody(req, res);
+    if (!payload) return;
+    const name = str(payload.name);
+    const row = readConnections().profiles.find(r => r.name === name);
+    if (!row) return send(res, 404, JSON.stringify({ error: `no connection named "${name}"` }));
+    const { apiKey, keyError } = revealSecret(row.enc, row.apiKey);
+    if (keyError) return send(res, 409, JSON.stringify({ error: keyError }));
+    return send(res, 200, JSON.stringify({ apiKey }));
+  }
+
   // The settings of one tool. `?tool=` defaults to claude so an older page that
   // never learned about tools keeps working unchanged.
   if (req.method === 'GET' && p === '/api/settings') {

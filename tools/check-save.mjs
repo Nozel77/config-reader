@@ -379,4 +379,52 @@ srv3.kill();
   ok('the BOM is not counted as part of the document', !JSON.stringify(read.parsed).includes('\uFEFF'));
 }
 
+// --- saved endpoints: one store, three routes, no token in a list reply ---------
+// The store is the one file this feature owns, and it lands in the scratch home like
+// every other config this suite touches.
+const connFile = join(SCRATCH, '.config-reader', 'connections.json');
+{
+  const empty = await get('/api/connections');
+  ok('the connection store starts empty', empty.exists === false && empty.profiles.length === 0, JSON.stringify(empty));
+  ok('the list reply never carries a token', !JSON.stringify(empty).includes('apiKey'));
+
+  const bad = await post('/api/connections', { profiles: [{ name: 'x', baseUrl: 'not a url' }] });
+  ok('a connection with no usable URL is refused', bad.status === 400 && /Base URL/.test(bad.body.error), JSON.stringify(bad.body));
+
+  const dup = await post('/api/connections', { profiles: [
+    { name: 'same', baseUrl: 'http://a' }, { name: 'SAME', baseUrl: 'http://b' }] });
+  ok('two connections cannot share a name', dup.status === 400 && /named/.test(dup.body.error), JSON.stringify(dup.body));
+
+  const made = await post('/api/connections', { profiles: [
+    { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a', apiKey: 'sk-live-token' },
+    { name: 'remote', baseUrl: 'https://ai.example', model: 'knr/b' },
+  ] });
+  ok('a store is written', made.status === 200 && made.body.count === 2, JSON.stringify(made.body));
+  ok('the store lands under the scratch home', existsSync(connFile), connFile);
+
+  const listed = await get('/api/connections');
+  ok('the list carries names, not secrets',
+    listed.profiles.length === 2 && listed.profiles[0].hasKey === true && !JSON.stringify(listed).includes('sk-live-token'),
+    JSON.stringify(listed.profiles));
+
+  const revealed = await post('/api/connections/reveal', { name: 'local' });
+  ok('the token is handed out one row at a time', revealed.status === 200 && revealed.body.apiKey === 'sk-live-token',
+    JSON.stringify(revealed.body));
+  const noKey = await post('/api/connections/reveal', { name: 'remote' });
+  ok('a row with no stored key reveals an empty string', noKey.status === 200 && noKey.body.apiKey === '', JSON.stringify(noKey.body));
+  const missing = await post('/api/connections/reveal', { name: 'ghost' });
+  ok('revealing an unknown name is a 404', missing.status === 404, String(missing.status));
+
+  // Editing a URL must not require retyping the token.
+  await post('/api/connections', { profiles: [
+    { name: 'local', baseUrl: 'http://localhost:9999', model: 'knr/a' }] });
+  const kept = await post('/api/connections/reveal', { name: 'local' });
+  ok('a row saved without a key keeps the stored one', kept.body.apiKey === 'sk-live-token', JSON.stringify(kept.body));
+
+  const foreign = await post('/api/connections', { profiles: [
+    { name: 'evil', baseUrl: 'http://evil', enc: 'plain', apiKey: 'x' }] });
+  ok('a client cannot claim how a secret is stored', foreign.status === 200
+    && readFileSync(connFile, 'utf8').includes('"enc"'), 'enc is decided server-side');
+}
+
 finish();

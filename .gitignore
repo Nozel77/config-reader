@@ -18,6 +18,8 @@ tools/shots/
 .env
 *.pem
 *.key
+connections.json
+.hermes/
 
 # Node (zero deps today; future-proofing)
 node_modules/
