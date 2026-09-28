@@ -30,6 +30,8 @@ Then: **pick a tool → edit the connection values → Save.** Reload re-reads t
 
 On Windows you can also double-click `start.cmd`. Put a desktop icon there once with `start.cmd --shortcut`.
 
+On macOS, `node server.js --shortcut` writes a double-clickable `CONFIG READER.command` into `~/Applications` — open it from Finder and the editor starts and opens its own tab. No `node server.js` to type again after that.
+
 ![Editor, dark theme](assets/editor-dark.png)
 
 ## Features
@@ -100,7 +102,7 @@ node server.js [--port 8787] [--open] [--selftest] [--shortcut] [--name NAME] [-
 | `--port N` | Listen port (default `8787`). |
 | `--open` | If something is already running on that port, just open the browser instead of dying with `EADDRINUSE`. Otherwise start and open. |
 | `--selftest` | Run the built-in checks (round-trip, backups, path composition, `/v1/models` URL logic, launcher quoting, simple-mode formats) and exit. |
-| `--shortcut` | Write the double-click launcher and exit. `--name` renames it, `--dir` places it anywhere — the public desktop, a USB stick. |
+| `--shortcut` | Write the double-click launcher and exit. `--name` renames it, `--dir` places it anywhere — the public desktop, a USB stick. On macOS that is a `.command` in `~/Applications`; on Linux a `.desktop` in `~/.local/share/applications`; on Windows a desktop `.lnk`. Each launcher spells out the absolute path of the `node` that created it, so a Homebrew/nvm install is found by a Finder double-click even though the GUI PATH would not have it. |
 
 Environment overrides, each following the tool's own rule: `CLAUDE_CONFIG_DIR` for `~/.claude`, `CODEX_HOME` for `~/.codex`, `HERMES_HOME` for `~/.hermes`. Honoured by scan, read, write, and selftest.
 
@@ -109,7 +111,8 @@ Environment overrides, each following the tool's own rule: `CLAUDE_CONFIG_DIR` f
 - **Emptying a field deletes the key** from `env`. Unknown keys appear under "Other variables" with add support — nothing is silently dropped.
 - **The model picker writes the target you name.** Assign sets whichever variable opened the dialog; a model advertising a ≥1M context window gets the `[1m]` suffix Claude Code expects, and anything else has it stripped.
 - **Non-canonical files are announced.** If re-serialising the file would change it (indentation, key order, spacing), the editor says so before you save — a reformat you agreed to, not one you find in `git diff` later.
-- **Broken files are a supported state.** Invalid JSON shows the raw text and the parse error instead of crashing.
+- **Broken files are a supported state.** Invalid JSON shows the raw text and the parse error instead of crashing, and Save is disabled so the broken file is not overwritten. When the mistake is one the parser's own message cannot name — a `//` comment, a trailing comma, curly quotes — the banner says which it is, because all three come back as the same opaque "Expected double-quoted property name".
+- **`settings.json` is strict JSON, and this editor matches Claude Code.** A `//` comment or a trailing comma is a syntax error in that file — Claude Code reports it as a Settings Error at the next start — so the editor refuses it too rather than silently rewriting your file into a form you did not write. `opencode.json` is the exception: that one is JSONC in the wild and trailing commas are tolerated.
 - **`model:` block edits are surgical.** Only `default`, `base_url` and (when absent) `provider` are touched. A `context_length`, a `max_tokens`, or an `api_key: ${YOUR_OWN_VAR}` line you wrote by hand survives a save untouched.
 - **Simple-mode secrets stay put.** Hermes keeps its key in `.env`, so the form hands that field back empty on load — empty means "leave the stored key alone", not "erase it".
 - **Buttons say what they are doing.** Every button that waits on the network (Save, Reload, Load models, the per-model test) disables itself and shows a spinner while the request is in flight, then hands itself back when it settles — including when it fails.
@@ -152,7 +155,7 @@ lib/
   model-caps.js       Context window, vision, tools, pricing from a /v1/models reply.
   secrets.js          DPAPI at rest on Windows; plain elsewhere.
   connections.js      The saved-endpoint store.
-  shortcut.js         Desktop launcher installers for Windows, Linux, macOS.
+  shortcut.js         Desktop launcher installers for Windows, Linux, macOS — the `.command` is what a Mac double-clicks.
   router.js           All HTTP routes.
   tools/
     index.js          Tool registry (id, mode, bin), path resolution, simple-mode dispatch.
@@ -175,6 +178,7 @@ index.html            One page: the tool rail and the editor. Loads /app.js as a
 styles.css            All styling, light/dark via CSS custom properties + data-theme.
 icons/                One PNG per tool id (claude, codex, opencode, hermes).
 start.cmd             Windows entry point: open, or --shortcut to install the desktop icon.
+                      (macOS and Linux have no equivalent script — `--shortcut` writes the launcher.)
 assets/               Screenshots used by this README, all captured at 1280x720.
 scripts/
   selftest.js         Logic checks: round-trip, backups, path composition, formats.

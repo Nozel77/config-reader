@@ -187,8 +187,13 @@ export async function load(): Promise<void> {
     }
   }
   if (s.parseError) {
+    // The hint names the mistake in the file (a comment, a trailing comma); the raw
+    // parser message stays for the cases it cannot classify. Shown only when it has
+    // something to add — otherwise it would just repeat the line below it.
     bs.push(el('div', { class: 'banner banner--error' },
-      el('b', { text: 'This file is not valid. ' }), s.parseError,
+      el('b', { text: 'This file is not valid. ' }),
+      s.parseHint ? el('span', {}, s.parseHint, ' ') : null,
+      el('span', { class: 'banner__detail' }, s.parseError),
       '. Saving is disabled so the broken file is not overwritten.'));
   } else if (!s.exists) {
     // These files are usually written by the tool itself, so a missing one is worth saying.

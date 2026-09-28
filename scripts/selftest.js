@@ -18,6 +18,7 @@ const {
   toolPaths,
   scanInfo,
   readSettings,
+  parseHint,
   BACKUPS,
   backupBeforeWrite,
   atomicWrite,
@@ -38,6 +39,7 @@ const {
   vbsLauncher,
   execQuote,
   shQuote,
+  nodeBin,
   installShortcutLinux,
   installShortcutMac,
   resolveDirArg,
@@ -76,7 +78,27 @@ function selftest() {
   const back = JSON.parse(JSON.stringify(probe, null, 2));
   ok('unknown key survives', JSON.stringify(back.__probe) === JSON.stringify({ a: 1, nested: [1, 'x'] }));
 
-  // 3. atomic write leaves no .tmp behind
+  // 3. a broken file gets a plain-language hint, not just V8's sentence. The two
+  // constructs Claude Code's own docs call syntax errors — a `//` comment and a
+  // trailing comma — are the ones a hand-edited file actually contains, and V8
+  // reports both with the same opaque message. The hint has to tell them apart.
+  const hintOf = text => { try { JSON.parse(text); return null; } catch (e) { return parseHint(text, e.message); } };
+  const commentFile = '{\n    "env": {\n        "A": "b"\n    },\n    // my notes\n    "model": "sonnet"\n}';
+  const commaFile = '{\n    "env": {\n        "A": "b"\n    },\n    "model": "sonnet",\n}';
+  ok('a // comment is named as a comment', /comment/.test(hintOf(commentFile) || ''), hintOf(commentFile));
+  ok('a trailing comma is named as a trailing comma', /trailing comma/.test(hintOf(commaFile) || ''), hintOf(commaFile));
+  // The two must not be confused: the comma case is reported on the line *after* the
+  // comma, so a naive "is this line a comment" check would miss it entirely.
+  ok('the two hints are not each other', hintOf(commentFile) !== hintOf(commaFile));
+  ok('curly quotes are named', /curly quotes/.test(hintOf('{\n    “env”: {}\n}') || ''));
+  // A file the hint cannot classify must return null, not a wrong guess — the raw
+  // parser message is still shown, and a confident wrong answer is worse than none.
+  ok('an unclassifiable break gets no hint', hintOf('{\n    env: {}\n}') === null);
+  ok('a truncated file gets no hint', hintOf('{\n  "env": { "A": 1 },\n  "model": "sonnet"\n') === null);
+  // A valid file never reaches the hint path at all.
+  ok('a valid file parses clean', hintOf('{\n    "model": "sonnet"\n}') === null);
+
+  // 4. atomic write leaves no .tmp behind
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-'));
   const probeFile = path.join(dir, 'probe.json');
   atomicWrite(probeFile, '{"ok":true}');
@@ -526,8 +548,7 @@ function selftest() {
   const execLine = desktop.split('\n').find(l => l.startsWith('Exec='));
   // Desktop Entry spec: an argument with a reserved character is quoted with " and
   // its \ " ` $ are backslash-escaped. Unquoted, the space splits the path in two.
-  ok('linux: the Exec line quotes the script path', /^Exec=node "[^"]+server\.js" --port 8787 --open$/.test(execLine), execLine);
-  ok('linux: Path and Terminal are set', desktop.includes(`Path=${HERE}`) && desktop.includes('Terminal=false'));
+  ok('linux: the Exec line quotes the script path', /^Exec="[^"]*node[^"]*" "[^"]+server\.js" --port 8787 --open$/.test(execLine), execLine);  ok('linux: Path and Terminal are set', desktop.includes(`Path=${HERE}`) && desktop.includes('Terminal=false'));
   // The +x bit is a POSIX concept; on Windows chmod can only touch the read-only
   // flag, so the mode is checked where it means something and the source where it
   // does not. Either way the chmodSync call itself is asserted — and it is asserted
@@ -543,6 +564,20 @@ function selftest() {
   const command = fs.readFileSync(macFile, 'utf8');
   ok('macos: the .command file starts with a shebang', command.startsWith('#!/bin/sh\n'), JSON.stringify(command.slice(0, 20)));
   ok('macos: the cd is single-quoted for the shell', command.includes(`cd '${HERE}'`), command.split('\n')[1]);
+  // A launcher is started by Finder, which has no login shell's PATH — a Homebrew or
+  // nvm node is not on the PATH it hands over, so `node ./server.js` died with
+  // "command not found" on exactly the machines that install node with a package
+  // manager. The interpreter must be the absolute path of the node that wrote the file.
+  const execMac = command.split('\n').find(l => l.startsWith('exec ')) || '';
+  ok('macos: the interpreter is an absolute path, not a bare `node`',
+    execMac.startsWith(`exec '${nodeBin()}' `), execMac);
+  ok('macos: the interpreter\'s own folder is prepended to PATH',
+    command.includes(`PATH='${path.dirname(nodeBin())}':$PATH`), command.split('\n')[2]);
+  // `open` is what --open calls on macOS, and LaunchServices has no handler for a
+  // .command — it exits non-zero and opens nothing. The tab has to come from the
+  // server's own `open <url>`, so the file must not call `open` on itself.
+  ok('macos: the launcher never asks `open` to open the .command',
+    !/\bopen\b[^\n]*\.command/.test(command) && !command.includes('open "$0"'), execMac);
   ok('macos: the launcher is chmod +x', process.platform === 'win32'
     ? /installShortcutMac[\s\S]*?chmodSync\(file, 0o755\)/.test(shortcutSrc)
     : (fs.statSync(macFile).mode & 0o111) !== 0,

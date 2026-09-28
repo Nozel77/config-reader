@@ -28,14 +28,14 @@ const { withV1, modelsUrl, chatUrl } = require('./lib/upstream.js');
 const { num } = require('./lib/util.js');
 const { modelWindows, VISION_TRUE_TOKENS, visionFromModalities, VISION_BOOL_KEYS, VISION_MOD_KEYS, rowVision, modelVision, modelCaps } = require('./lib/model-caps.js');
 const { PROVIDER, PROVIDER_LABEL } = require('./lib/tools/provider.js');
-const { readSettings } = require('./lib/tools/claude.js');
+const { readSettings, parseHint } = require('./lib/tools/claude.js');
 const { tomlString, tomlUnquote, tomlTopValue, tomlSectionValues, tomlSetTop, tomlSetSection, tomlSetInSection, codexKey, codexRead, codexWrite } = require('./lib/tools/codex.js');
 const { jsoncParse, opencodeRead, opencodeWrite } = require('./lib/tools/opencode.js');
 const { HERMES_MODEL_RE, HERMES_DELEGATION_RE, HERMES_AUX_RE, HERMES_ROLES, hermesRoleRe, hermesBlockValue, hermesRead, hermesPatchBlock, hermesBuildBlock, hermesSetTopBlock, hermesSetRole, hermesWrite, envVarSet } = require('./lib/tools/hermes.js');
 const { TOOLS, toolById, hasBin, toolList, toolPaths, scanInfo, readSimple, writeSimple } = require('./lib/tools/index.js');
 const { CONNECTIONS_MAX, cleanConnection, cleanConnectionRow, readConnections, writeConnections } = require('./lib/connections.js');
 const { dpapi, secretsAtRest, protectSecret, revealSecret } = require('./lib/secrets.js');
-const { psQuote, vbsLauncher, installShortcutWindows, execQuote, shQuote, installShortcutLinux, installShortcutMac, resolveDirArg, desktopDirWin, installShortcut } = require('./lib/shortcut.js');
+const { psQuote, vbsLauncher, installShortcutWindows, execQuote, shQuote, nodeBin, installShortcutLinux, installShortcutMac, resolveDirArg, desktopDirWin, installShortcut } = require('./lib/shortcut.js');
 const { handler } = require('./lib/router.js');
 
 // ------------------------------------------------------------------------ main
@@ -145,6 +145,7 @@ module.exports = {
   PROVIDER_LABEL,
   scanInfo,
   readSettings,
+  parseHint,
   BACKUPS,
   backupBeforeWrite,
   sleep,
@@ -192,6 +193,7 @@ module.exports = {
   installShortcutWindows,
   execQuote,
   shQuote,
+  nodeBin,
   installShortcutLinux,
   installShortcutMac,
   resolveDirArg,

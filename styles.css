@@ -585,6 +585,10 @@ code { font-family: var(--font-mono); }
 .banner--warn { color: var(--warn-text); background: var(--warn-soft); border-color: var(--warn); }
 .banner--error { color: var(--err-text); background: var(--err-soft); border-color: var(--err); }
 .banner b { font-weight: 650; }
+/* The parser's own words, kept verbatim behind the plain-language hint. Monospace
+   rather than a lighter colour: it reads as a machine message without dropping the
+   colour below the contrast the rest of the banner is held to. */
+.banner__detail { font-family: var(--font-mono); font-size: 0.8125rem; }
 
 /* -------------------------------------------------------------- buttons */
 

@@ -69,6 +69,7 @@ export interface SettingsResponse {
   mtimeMs?: number;
   normalized?: boolean;
   parseError?: string | null;
+  parseHint?: string | null;
   values?: SimpleValues;
 }
 
