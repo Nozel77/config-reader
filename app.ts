@@ -219,8 +219,8 @@ let loadedFor = '';                       // base URL + token the list was read 
 
 // A saved endpoint: the three values every tool asks for, typed once. `hasKey` is
 // what the server said — the token itself is fetched per row, on Apply, and never
-// rides the list reply.
-interface Connection { name: string; baseUrl: string; model: string; hasKey?: boolean }
+// rides the list reply. `apiKey` only exists on a row while it is being typed.
+interface Connection { name: string; baseUrl: string; model: string; hasKey?: boolean; apiKey?: string }
 interface ConnectionsResponse {
   file?: string; exists?: boolean; atRest?: boolean;
   profiles?: Connection[]; error?: string;
@@ -1193,11 +1193,12 @@ function connInput(i: number, field: keyof Connection): HTMLInputElement | null 
 const connectionsOpen = (): boolean =>
   (($('connections') as unknown as HTMLDialogElement).open === true);
 
-// One row is one endpoint: its name, then the three values. The name is a field like
-// any other, so nothing has to be re-rendered while it is being typed.
+// One row is one endpoint. The name is the card's header — it is what the row is
+// called, not one of the three values — and the three values sit under it in the
+// order every tool asks for them: base URL, auth token, model.
 function connRow(c: Connection, i: number): HTMLElement {
-  const field = (key: keyof Connection, label: string, kind: 'text' | 'secret', placeholder = ''): HTMLElement => {
-    const input = el('input', {
+  const input = (key: keyof Connection, kind: 'text' | 'secret', placeholder: string, label: string): HTMLInputElement => {
+    const box = el('input', {
       class: 'conn__input',
       type: kind === 'secret' ? 'password' : 'text',
       'data-conn': `${i}:${key}`,
@@ -1211,34 +1212,40 @@ function connRow(c: Connection, i: number): HTMLElement {
         connsDirty = true;
         connsError = '';
         ($('connections-save') as HTMLButtonElement).disabled = false;
+        // The token controls only mean something once there is a token: an empty row
+        // gets them on the first keystroke, a cleared row loses them again.
+        if (key === 'apiKey') refreshConnRow(i, box.value !== '');
       },
     }) as HTMLInputElement;
-    const row = el('div', { class: 'conn__row' }, input);
-    if (kind === 'secret') {
-      const eye = el('button', {
-        class: 'button button--ghost button--icon button--small', type: 'button',
-        title: 'reveal the token', 'aria-label': 'Show token',
-        onclick: () => {
-          const shown = input.type === 'password';
-          input.type = shown ? 'text' : 'password';
-          eye.replaceChildren(icon(shown ? 'eyeSlash' : 'eye'));
-        },
-      }, icon('eye'));
-      row.append(eye);
-    }
-    return el('label', { class: 'conn__field' }, el('span', { class: 'conn__label', text: label }), row);
+    return box;
   };
 
+  // The token's trailing controls are built once and shown/hidden as one, so the
+  // input's width never jumps as they come and go.
+  const apiInput = input('apiKey', 'secret', c.hasKey ? 'keep the stored token' : 'paste the token', 'Auth token');
+  const eye = el('button', {
+    class: 'button button--ghost button--icon button--small', type: 'button',
+    title: 'reveal the token', 'aria-label': 'Show token',
+  }, icon('eye')) as HTMLButtonElement;
+  // A closure over the button rather than event.currentTarget: one less thing to be
+  // true about the event, and the DOM shim in the checks does not carry it.
+  eye.addEventListener('click', () => {
+    const shown = apiInput.type === 'password';
+    apiInput.type = shown ? 'text' : 'password';
+    eye.replaceChildren(icon(shown ? 'eyeSlash' : 'eye'));
+  });
+  const apiTools = el('div', { class: 'conn__tools' }, eye);
+  // Only worth offering where there is something to reveal.
+  apiTools.hidden = !c.hasKey && !c.apiKey;
+
   const badges: HTMLElement[] = [];
-  if (c.hasKey) {
-    badges.push(el('span', {
-      class: 'badge badge--ok', text: 'key stored',
+  badges.push(c.hasKey || c.apiKey
+    ? el('span', {
+      class: 'badge badge--ok', text: 'token stored',
       title: connsAtRest ? 'encrypted at rest' : 'stored as plain text',
-    }));
-  } else {
-    badges.push(el('span', { class: 'badge', text: 'no key' }));
-  }
-  // Only worth saying when a tool is open and the endpoint is not the one in the form.
+    })
+    : el('span', { class: 'badge', text: 'no token' }));
+  // Derived from the form, never stored: only worth saying while a tool is open.
   if (opened && connMatches(c)) badges.push(el('span', { class: 'badge badge--ok', text: 'in the form' }));
 
   const apply = el('button', {
@@ -1249,9 +1256,22 @@ function connRow(c: Connection, i: number): HTMLElement {
   apply.addEventListener('click', () => { void applyConnection(c, apply); });
 
   return el('section', { class: 'conn', 'data-conn-row': String(i) },
-    el('div', { class: 'conn__top' },
-      field('name', 'Name', 'text', 'local gateway'),
-      ...badges,
+    el('div', { class: 'conn__head' },
+      el('label', { class: 'conn__field conn__field--name' },
+        el('span', { class: 'conn__label', text: 'Name' }),
+        input('name', 'text', 'local gateway', 'Name')),
+      el('div', { class: 'conn__badges' }, ...badges)),
+    el('div', { class: 'conn__body' },
+      el('label', { class: 'conn__field' },
+        el('span', { class: 'conn__label', text: 'Base URL' }),
+        input('baseUrl', 'text', 'http://localhost:20128', 'Base URL')),
+      el('label', { class: 'conn__field' },
+        el('span', { class: 'conn__label', text: 'Auth token' }),
+        el('div', { class: 'conn__row' }, apiInput, apiTools)),
+      el('label', { class: 'conn__field' },
+        el('span', { class: 'conn__label', text: 'Model' }),
+        input('model', 'text', 'provider/model-id', 'Model'))),
+    el('div', { class: 'conn__foot' },
       el('button', {
         class: 'button button--ghost button--icon button--small button--danger', type: 'button',
         title: `delete ${c.name || 'this endpoint'}`, 'aria-label': `Delete ${c.name || 'this endpoint'}`,
@@ -1261,11 +1281,42 @@ function connRow(c: Connection, i: number): HTMLElement {
           renderConnections();
           ($('connections-save') as HTMLButtonElement).disabled = false;
         },
-      }, icon('trash'))),
-    field('baseUrl', 'Base URL', 'text', 'http://localhost:20128'),
-    field('model', 'Model', 'text', 'provider/model-id'),
-    field('apiKey', 'Token', 'secret', c.hasKey ? 'leave empty to keep the stored key' : 'paste the token'),
-    opened ? apply : null);
+      }, icon('trash')),
+      opened ? apply : null));
+}
+
+// Redraw one row in place. A token that appears or disappears changes which controls
+// the row offers, and rebuilding the whole list would lose the caret mid-typing.
+function refreshConnRow(i: number, hasTypedToken: boolean): void {
+  const row = document.querySelector(`[data-conn-row="${i}"]`);
+  const tools = row ? row.querySelector('.conn__tools') as HTMLElement | null : null;
+  if (tools) tools.hidden = !hasTypedToken && !conns[i]?.hasKey;
+}
+
+// What the open tool's form holds right now, as a new row. The three keys differ per
+// mode, so they come from connKeys() rather than being named here.
+function captureFromForm(): void {
+  const k = connKeys();
+  const e = env();
+  const baseUrl = (e[k.base] || '').trim();
+  if (!baseUrl) {
+    connsError = `there is no Base URL in ${tool.name}'s form to save yet.`;
+    renderConnections();
+    return;
+  }
+  const apiKey = (e[k.key] || '').trim();
+  const model = stripMarker((e[k.model] || '').trim());
+  // The host is the one name the user does not have to invent, and it is already unique
+  // enough to recognise the row by.
+  let name = baseUrl.replace(/^https?:\/\//, '').replace(/\/.*$/, '') || 'endpoint';
+  const taken = new Set(conns.map(c => c.name.toLowerCase()));
+  for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${name} (${n})`;
+  conns.push({ name, baseUrl, model, apiKey, hasKey: false });
+  connsDirty = true;
+  connsError = '';
+  renderConnections();
+  ($('connections-save') as HTMLButtonElement).disabled = false;
+  toast(`added ${name} from ${tool.name}'s form — Save to keep it`);
 }
 
 function renderConnections(): void {
@@ -1273,6 +1324,8 @@ function renderConnections(): void {
   $('connections-sub').textContent = opened
     ? `Apply fills ${tool.name}'s form. Save is what writes the file.`
     : 'Open a tool to apply one of these to its form.';
+  // Both gestures need a form to work with: one reads it, the other writes it.
+  $('connections-capture').hidden = !opened;
   $('connections-count').textContent = conns.length ? `${conns.length} saved` : '';
   const note = $('connections-note');
   note.classList.toggle('note--error', !!connsError);
@@ -1554,6 +1607,9 @@ $('connections-new').addEventListener('click', () => {
   ($('connections-save') as HTMLButtonElement).disabled = false;
   connInput(conns.length - 1, 'name')?.focus();
 });
+// The form is often already configured — by hand, by another tool, or by an earlier
+// session. Reading it back is one gesture instead of retyping three values.
+$('connections-capture').addEventListener('click', captureFromForm);
 $('connections-save').addEventListener('click', () => { void saveConnections(); });
 renderTools();
 void loadTools();

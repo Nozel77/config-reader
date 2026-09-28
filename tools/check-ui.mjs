@@ -1233,6 +1233,10 @@ ok('a row is drawn per saved endpoint', hook('connections-list').querySelectorAl
 ok('a row shows its name', !!connInput(0, 'name') && connInput(0, 'name').value === 'local',
   connInput(0, 'name') ? connInput(0, 'name').value : '(no input)');
 ok('a row shows its base URL', connInput(0, 'baseUrl')?.value === 'http://localhost:20128', connInput(0, 'baseUrl')?.value || '(no input)');
+// The order is the order every tool asks for, and the token is never named "key".
+const connLabels = () => [...hook('connections-list').querySelectorAll('.conn')[0].querySelectorAll('.conn__label')]
+  .map(e => e.textContent).join(' → ');
+ok('the values read base URL, auth token, model', connLabels() === 'Name → Base URL → Auth token → Model', connLabels());
 ok('the token field is never filled from the list reply',
   connInput(0, 'apiKey')?.value === '' && connInput(0, 'apiKey')?.type === 'password',
   `${connInput(0, 'apiKey')?.value} / ${connInput(0, 'apiKey')?.type}`);
@@ -1313,9 +1317,46 @@ hook('connections-open').fire('click');
 await settle();
 ok('the landing draws the saved endpoints too', hook('connections-list').querySelectorAll('.conn').length === 2);
 ok('the landing offers no Apply', hook('connections-list').querySelectorAll('.conn__apply').length === 0);
+ok('the landing offers no capture either', hook('connections-capture').hidden === true);
 ok('the dialog says what Apply would do', /Open a tool/.test(hook('connections-sub').textContent),
   hook('connections-sub').textContent);
 hook('connections-close').fire('click');
+
+// ---- capturing the form: the tool is often configured before the store is -------
+// A form already pointed at an endpoint is the normal case — by hand, by an earlier
+// session, by another tool. Reading it back has to be one gesture.
+hook('tool-picker').children[0].fire('click');
+await settle();
+api.setEnv('ANTHROPIC_BASE_URL', 'http://localhost:20128/v1');
+api.setEnv('ANTHROPIC_MODEL', 'ag/opus-4[1m]');
+api.setEnv('ANTHROPIC_AUTH_TOKEN', 'sk-from-the-form');
+hook('connections-open').fire('click');
+await settle();
+const before = hook('connections-list').querySelectorAll('.conn').length;
+ok('the capture button is offered while a tool is open', hook('connections-capture').hidden !== true);
+hook('connections-capture').fire('click');
+await settle();
+ok('capture adds one row', hook('connections-list').querySelectorAll('.conn').length === before + 1,
+  `${before} → ${hook('connections-list').querySelectorAll('.conn').length}`);
+const last = before;
+ok('capture reads the base URL off the form', connInput(last, 'baseUrl')?.value === 'http://localhost:20128/v1',
+  connInput(last, 'baseUrl')?.value || '(none)');
+ok('capture reads the token off the form', connInput(last, 'apiKey')?.value === 'sk-from-the-form',
+  connInput(last, 'apiKey')?.value || '(none)');
+ok('capture strips the [1m] marker', connInput(last, 'model')?.value === 'ag/opus-4',
+  connInput(last, 'model')?.value || '(none)');
+ok('capture names the row after the host', connInput(last, 'name')?.value === 'localhost:20128',
+  connInput(last, 'name')?.value || '(none)');
+// A second capture of the same endpoint must not collide with the first.
+hook('connections-capture').fire('click');
+await settle();
+ok('a second capture of the same endpoint gets its own name',
+  connInput(last + 1, 'name')?.value === 'localhost:20128 (2)', connInput(last + 1, 'name')?.value || '(none)');
+hook('connections-save').fire('click');
+await settle();
+ok('captured rows are posted like any other', connPosted.at(-1)?.profiles.length === before + 2,
+  JSON.stringify(connPosted.at(-1)?.profiles?.length ?? null));
+ok('a captured token travels to the server', connPosted.at(-1)?.profiles[last]?.apiKey === 'sk-from-the-form');
 
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
 const failed = results.filter(r => !r.pass).length;

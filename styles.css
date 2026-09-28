@@ -908,28 +908,55 @@ body:has(.model-picker[open]), body:has(.connections[open]) { overflow: hidden; 
 
 .connections__list {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 0.6rem;
-  max-height: min(56dvh, 30rem);
+  /* No max-height of its own: the dialog is already capped, and two caps meant a
+     second card could be cut by a scroller that never needed to appear. */
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 0.15rem 0.5rem 0;
 }
 
 .conn {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0.35rem;
-  padding: 0.7rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.8rem 0.9rem;
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: 10px;
   transition: border-color var(--transition);
 }
 .conn:hover { border-color: var(--border-strong); }
-.conn__top { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-.conn__field { display: grid; grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr); align-items: center; gap: 0.5rem; }
+
+/* The name is the card's title, so it takes the first line with its badges; the
+   three values line up under it on one shared label column. */
+.conn__head { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.conn__badges { display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; flex: 0 0 auto; }
+.conn__head .conn__field--name { flex: 1 1 auto; }
+
+/* Every value row is the same two-track grid — label column, control column — so the
+   labels sit on one axis down the card. Each row carries its own copy of the tracks
+   rather than one shared grid: a <label> kept as a real box keeps its input
+   association, which display: contents would put at risk. */
+.conn__body { display: flex; flex-direction: column; gap: 0.45rem; }
+.conn__field {
+  display: grid;
+  grid-template-columns: minmax(0, 6rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
 .conn__label { font-size: 0.78rem; color: var(--text-2); }
+
+.conn__row { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.conn__row .conn__input { flex: 1 1 auto; }
+/* Reveal controls, hidden as one block: the input keeps its width when they go. */
+.conn__tools { display: flex; align-items: center; gap: 0.4rem; flex: 0 0 auto; }
+.conn__tools[hidden] { display: none; }
+
 .conn__input {
   min-width: 0;
   height: var(--ctl);
@@ -949,7 +976,10 @@ body:has(.model-picker[open]), body:has(.connections[open]) { overflow: hidden; 
   background: var(--surface);
 }
 .conn__input::placeholder { color: var(--placeholder); }
-.conn__row { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+
+/* The row's own actions sit at the card's foot, on the same right edge as everything
+   else, instead of being pushed around by the badges on the title line. */
+.conn__foot { display: flex; align-items: center; gap: 0.4rem; }
 .conn__apply { margin-left: auto; }
 
 .connections__foot { display: flex; align-items: center; gap: 0.5rem; }
@@ -1313,7 +1343,11 @@ body:has(.model-picker[open]), body:has(.connections[open]) { overflow: hidden; 
   .model-picker__bar, .model-picker__list { min-width: 0; }
   /* A phone has no room for a label column on a saved endpoint either. */
   .conn__field { grid-template-columns: 1fr; gap: 0.2rem; }
-  .connections__list { max-height: none; }
+  /* The dialog is the screen here and the page behind it cannot scroll, so the list
+     takes the leftover height and scrolls inside it — otherwise the last row hides
+     under the footer with no way to reach it. */
+  .connections { height: 100dvh; overflow: hidden; }
+  .connections__list { flex: 1 1 auto; min-height: 0; max-height: none; }
   /* A tooltip is absolutely positioned, but it still counts as scrollable overflow:
      anchored to the right of a card it made the whole page scroll sideways on a
      phone. Grow it leftward from the button and cap it to the viewport. */

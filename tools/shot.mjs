@@ -3,8 +3,8 @@
 // global WebSocket, and any Chromium will do.
 //   OUT=./tools/shots node tools/shot.mjs [http://127.0.0.1:8787]
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
 // Find a browser. Env override first, then whatever playwright already downloaded,
@@ -105,6 +105,7 @@ const shot = async (file, { dark = false, full = true } = {}) => {
 
 const bail = async e => {
   console.error('FAILED:', e.message);
+  try { globalThis.__restoreConnections?.(); } catch { /* nothing to put back yet */ }
   try { ws.close(); } catch {}
   try { chrome.kill(); } catch {}
   process.exit(1);
@@ -373,6 +374,63 @@ console.log('back from two deep:', await evaluate(`JSON.stringify({
   editorOpen: !document.querySelector('[data-js="editor"]').hidden,
 })`));
 await shot(join(OUT, '22-routing.png'), { full: false });
+
+// --- saved endpoints: the dialog, empty then with two rows, both themes ---------
+// A real store on this machine is what the dialog reads, so seed one through the
+// running server and then clean it up: the file is the user's, not the tool's.
+// A tool has to be open first: Apply only exists where there is a form to fill.
+await evaluate(`document.querySelectorAll('[data-js="tool-picker"] .tool-card')[0].click()`);
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
+  await sleep(250);
+}
+const connFile = join(homedir(), '.config-reader', 'connections.json');
+const connBackup = existsSync(connFile) ? readFileSync(connFile, 'utf8') : null;
+// This script writes a store into the real home, so the restore has to survive a
+// crash: bail() runs the same cleanup, or a failed run leaves demo rows behind.
+const restoreConnections = () => {
+  try {
+    if (connBackup === null) rmSync(join(homedir(), '.config-reader'), { recursive: true, force: true });
+    else writeFileSync(connFile, connBackup);
+  } catch { /* the file is the user's; a failed restore must not mask the real error */ }
+};
+await evaluate(`(async()=>{ await fetch('/api/connections',{method:'POST',headers:{'content-type':'application/json'},
+  body: JSON.stringify({ profiles: [
+    { name: 'local gateway', baseUrl: 'http://localhost:20128', model: 'kenari/ka-free', apiKey: 'sk-demo-token' },
+    { name: 'ai.ka4.dev', baseUrl: 'https://ai.ka4.dev', model: 'kenari/deepseek-v4-1-flash' },
+  ] }) }); })()`);
+await evaluate(`document.querySelector('[data-js="connections-open"]').click()`);
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`document.querySelectorAll('[data-js="connections-list"] .conn').length === 2`)) break;
+  await sleep(250);
+}
+await sleep(500);
+console.log('connections dialog:', await evaluate(`JSON.stringify({
+  rows: document.querySelectorAll('[data-js="connections-list"] .conn').length,
+  apply: document.querySelectorAll('[data-js="connections-list"] .conn__apply').length,
+  note: document.querySelector('[data-js="connections-note"]').textContent,
+})`));
+await shot(join(OUT, '24-connections.png'));
+await shot(join(OUT, '25-connections-dark.png'), { dark: true });
+// Phone: the row's label column folds, and the dialog becomes the screen.
+await cmd('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 2, mobile: true });
+await sleep(500);
+await shot(join(OUT, '26-connections-phone.png'), { full: false });
+await cmd('Emulation.clearDeviceMetricsOverride');
+await sleep(400);
+// Apply, and read back what the form holds: the one thing the UI test cannot show.
+await evaluate(`document.querySelectorAll('[data-js="connections-list"] .conn__apply')[0].click()`);
+await sleep(1200);
+console.log('after apply:', await evaluate(`JSON.stringify({
+  dialogOpen: document.querySelector('[data-js="connections"]').open,
+  base: document.querySelector('[data-card="ANTHROPIC_BASE_URL"] input').value,
+  model: document.querySelector('[data-card="ANTHROPIC_MODEL"] input').value,
+  token: document.querySelector('[data-card="ANTHROPIC_AUTH_TOKEN"] input').value.slice(0, 6) + '…',
+  dirty: document.querySelector('[data-js="actionbar-dot"]').className.includes('dirty'),
+})`));
+await shot(join(OUT, '27-after-apply.png'), { full: false });
+// Put the store back the way it was found.
+restoreConnections();
 
 // --- console errors? ---
 const errs = await evaluate(`JSON.stringify(window.__errs||[])`);

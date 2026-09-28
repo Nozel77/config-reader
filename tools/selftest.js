@@ -754,22 +754,23 @@ function selftest() {
   fs.rmSync(sdir, { recursive: true, force: true });
 
   // 14b. saved endpoints: one file under the home dir, never a path from the browser.
+  // The empty-read check runs with the home env pointed at a scratch dir: reading the
+  // real home would make this pass or fail on whatever the user happens to have saved.
+  const connDir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-conn-'));
+  const savedHomeEnv = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = connDir;
   const connFile = connectionsFile();
   ok('the connection store lives under the home dir',
-    connFile === path.join(os.homedir(), '.config-reader', 'connections.json'), connFile);
+    connFile === path.join(connDir, '.config-reader', 'connections.json'), connFile);
   ok('a missing store reads as empty, not as an error',
     JSON.stringify(readConnections()) === JSON.stringify({ exists: false, profiles: [] }),
     JSON.stringify(readConnections()));
+  ok('the store follows the home dir it is given',
+    connectionsFile() === path.join(connDir, '.config-reader', 'connections.json'), connectionsFile());
 
   // 14c. the store's own rules: what a row is, what it drops, and what a hand-broken
   // file does. The store path is derived from os.homedir() at call time, so pointing
   // the home env at a scratch dir is what keeps the real one out of scope.
-  const connDir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-conn-'));
-  const savedHomeEnv = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
-  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = connDir;
-  ok('the store follows the home dir it is given',
-    connectionsFile() === path.join(connDir, '.config-reader', 'connections.json'), connectionsFile());
-
   const wrote = writeConnections([
     { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a', extra: 'nope' },
     { name: 'nope', baseUrl: 'not a url', model: 'x' },
