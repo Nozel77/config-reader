@@ -88,6 +88,12 @@ const {
   modelVision,
   num,
   modelCaps,
+  connectionsFile,
+  readConnections,
+  writeConnections,
+  protectSecret,
+  revealSecret,
+  secretsAtRest,
   handler,
   main,
   stripTypeScriptTypes,
@@ -746,6 +752,14 @@ function selftest() {
   ok('hermes: an existing key is replaced, not appended',
     (envVarSet('OPENAI_API_KEY=old\n', 'OPENAI_API_KEY', 'sk-h').match(/OPENAI_API_KEY=/g) || []).length === 1);
   fs.rmSync(sdir, { recursive: true, force: true });
+
+  // 14b. saved endpoints: one file under the home dir, never a path from the browser.
+  const connFile = connectionsFile();
+  ok('the connection store lives under the home dir',
+    connFile === path.join(os.homedir(), '.config-reader', 'connections.json'), connFile);
+  ok('a missing store reads as empty, not as an error',
+    JSON.stringify(readConnections()) === JSON.stringify({ exists: false, profiles: [] }),
+    JSON.stringify(readConnections()));
 
   // 15. the port guard. `--port abc` reached net.listen as NaN and surfaced as a raw
   // RangeError stack; start.cmd now pauses on a non-zero exit, which would park that
