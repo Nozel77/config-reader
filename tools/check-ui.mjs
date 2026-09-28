@@ -183,6 +183,8 @@ globalThis.document = {
 const hook = name => jsHooks[name] || (jsHooks[name] = new El('div'));
 // A field input, looked up the way the page does.
 const inputFor = key => docRoot.querySelector(`[data-field="${key}"]`);
+// A saved-endpoint row's input, by row index and field name.
+const connInput = (i, field) => docRoot.querySelector(`[data-conn="${i}:${field}"]`);
 globalThis.addEventListener = () => {};
 globalThis.confirm = () => true;
 globalThis.setTimeout = () => 0;
@@ -240,6 +242,17 @@ const modelPosted = [];          // the {baseUrl, apiKey} the pane sent
 // Per-case reply for /api/test-model, and what the last call sent.
 let testReply = { ok: true, ms: 100 };
 let tested = null;
+// Saved endpoints. The list reply deliberately carries no token — the shim has to
+// look like the server, or a check would pass against a page that never asks.
+let connReply = { file: join(HOME, '.config-reader', 'connections.json'), exists: true, atRest: false,
+  profiles: [
+    { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a-model', hasKey: true },
+    { name: 'remote', baseUrl: 'https://ai.example', model: 'ag/opus-4[1m]', hasKey: false },
+  ] };
+let revealReply = { apiKey: 'sk-from-store' };
+const connPosted = [];
+let connGets = 0;      // how many times the dialog read the store
+let revealed = null;
 // Per-case overrides for the claude GET reply, so a banner path can be exercised.
 let claudeOverride = {};
 let modelReply = {
@@ -313,6 +326,12 @@ globalThis.fetch = async (url, opts = {}) => {
     tested = JSON.parse(opts.body || '{}');
     tested.calls = (tested.calls || 0) + 1;
     body = testReply;
+  } else if (r.includes('/api/connections/reveal')) {
+    revealed = JSON.parse(opts.body || '{}');
+    body = revealReply;
+  } else if (r.includes('/api/connections')) {
+    if (opts.method === 'POST') { connPosted.push(JSON.parse(opts.body || '{}')); body = { ok: true, count: connPosted.at(-1).profiles.length }; }
+    else { connGets++; body = connReply; }
   } else if (r.includes('/api/settings')) {
     const tool = toolOf(r);
     if (opts.method === 'POST') {
@@ -1195,6 +1214,104 @@ hook('editor-back').fire('click');
 ok('the sidebar back button lands on the picker, not the previous tool',
   !hook('app').className.includes('app--editor') && location.hash === '',
   `open=${!hook('editor').hidden} hash=${location.hash}`);
+
+// ---- saved endpoints -------------------------------------------------------
+// A second dialog, on the same rules as the model picker: it fills the form, it never
+// writes, and a token only travels when a row is applied.
+ok('the rail offers the saved endpoints', !!hook('connections-open'));
+ok('the dialog starts closed', hook('connections').open !== true);
+ok('nothing was fetched before it was opened', connGets === 0, `${connGets} reads`);
+
+hook('connections-open').fire('click');
+await settle();
+ok('opening the dialog reads the store once', connGets === 1, `${connGets} reads`);
+ok('a row is drawn per saved endpoint', hook('connections-list').querySelectorAll('.conn').length === 2,
+  String(hook('connections-list').querySelectorAll('.conn').length));
+ok('a row shows its name', !!connInput(0, 'name') && connInput(0, 'name').value === 'local',
+  connInput(0, 'name') ? connInput(0, 'name').value : '(no input)');
+ok('a row shows its base URL', connInput(0, 'baseUrl')?.value === 'http://localhost:20128', connInput(0, 'baseUrl')?.value || '(no input)');
+ok('the token field is never filled from the list reply',
+  connInput(0, 'apiKey')?.value === '' && connInput(0, 'apiKey')?.type === 'password',
+  `${connInput(0, 'apiKey')?.value} / ${connInput(0, 'apiKey')?.type}`);
+ok('a row with a stored key says so', hook('connections-list').querySelectorAll('.badge--ok').length >= 1,
+  String(hook('connections-list').querySelectorAll('.badge--ok').length));
+
+// Apply, on a tool that is open: the form is filled, the file is not written.
+api.setEnv('ANTHROPIC_BASE_URL', '');
+api.setEnv('ANTHROPIC_MODEL', '');
+api.setEnv('ANTHROPIC_AUTH_TOKEN', '');
+const applyBtns = hook('connections-list').querySelectorAll('.conn__apply');
+ok('every row offers Apply while a tool is open', applyBtns.length === 2, `${applyBtns.length} buttons`);
+if (applyBtns.length) {
+  applyBtns[0].fire('click');
+  await settle();
+}
+ok('apply asks the server for that one row\'s token', !!revealed && revealed.name === 'local', JSON.stringify(revealed));
+ok('apply fills the base URL', api.env().ANTHROPIC_BASE_URL === 'http://localhost:20128', api.env().ANTHROPIC_BASE_URL);
+ok('apply fills the token', api.env().ANTHROPIC_AUTH_TOKEN === 'sk-from-store');
+ok('apply closes the dialog', hook('connections').open !== true);
+ok('apply never wrote a config', posted.length === 0, `${posted.length} posts`);
+ok('apply marks the form dirty, so Save is the write',
+  hook('actionbar-dot').className.includes('actionbar__dot--dirty'), hook('actionbar-dot').className);
+
+// A model carrying Claude Code's [1m] marker must arrive bare at the other tools.
+hook('connections-open').fire('click');
+await settle();
+if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
+  hook('connections-list').querySelectorAll('.conn__apply')[1].fire('click');
+  await settle();
+}
+ok('apply strips a [1m] marker the target tool does not read',
+  api.env().ANTHROPIC_MODEL === 'ag/opus-4', api.env().ANTHROPIC_MODEL);
+
+// A token the user types is stored; a row left blank keeps the stored one.
+hook('connections-open').fire('click');
+await settle();
+if (connInput(1, 'apiKey')) {
+  connInput(1, 'apiKey').value = 'sk-typed';
+  connInput(1, 'apiKey').fire('input');
+  const revealBtn = connInput(1, 'apiKey').parentNode.querySelectorAll('.button--ghost')[0];
+  ok('the row offers a reveal button', !!revealBtn);
+  revealBtn.fire('click');
+  ok('the reveal button shows the token', connInput(1, 'apiKey').type === 'text', connInput(1, 'apiKey').type);
+  revealBtn.fire('click');
+  ok('the reveal button hides it again', connInput(1, 'apiKey').type === 'password', connInput(1, 'apiKey').type);
+} else {
+  ok('the row offers a reveal button', false, 'no second row to edit');
+}
+hook('connections-save').fire('click');
+await settle();
+ok('saving posts the working copy', connPosted.length === 1 && connPosted[0].profiles.length === 2,
+  JSON.stringify(connPosted[0] || null));
+ok('a typed token is sent', connPosted[0]?.profiles[1]?.apiKey === 'sk-typed');
+ok('a row left untouched sends no key at all', connPosted[0]?.profiles[0]?.apiKey === undefined,
+  JSON.stringify(connPosted[0]?.profiles[0] ?? null));
+
+// Escape must not throw a typed token away without asking.
+if (connInput(0, 'name')) {
+  connInput(0, 'name').value = 'renamed';
+  connInput(0, 'name').fire('input');
+} else {
+  ok('a name field exists to edit', false, 'no row');
+}
+let cancelled = false;
+globalThis.confirm = () => { cancelled = true; return false; };
+hook('connections').fire('cancel', { preventDefault() {} });
+ok('escape on a dirty dialog asks first', cancelled);
+ok('a refused cancel leaves the dialog open', hook('connections').open === true);
+globalThis.confirm = () => true;
+hook('connections').fire('cancel', { preventDefault() {} });
+ok('a confirmed cancel closes it', hook('connections').open !== true);
+
+// The landing has no form to fill, so Apply is not offered there.
+hook('editor-back').fire('click');
+hook('connections-open').fire('click');
+await settle();
+ok('the landing draws the saved endpoints too', hook('connections-list').querySelectorAll('.conn').length === 2);
+ok('the landing offers no Apply', hook('connections-list').querySelectorAll('.conn__apply').length === 0);
+ok('the dialog says what Apply would do', /Open a tool/.test(hook('connections-sub').textContent),
+  hook('connections-sub').textContent);
+hook('connections-close').fire('click');
 
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
 const failed = results.filter(r => !r.pass).length;
