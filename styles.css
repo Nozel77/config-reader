@@ -10,7 +10,7 @@
   --surface-2: #e5e7eb;
   --border: #d1d5db;
   /* A hover border and a secondary control's edge are the only cue for those states,
-     so this one clears 3:1 on all three light surfaces (tools/check-contrast.mjs). */
+     so this one clears 3:1 on all three light surfaces (scripts/check-contrast.mjs). */
   --border-strong: #7b8794;
   --text: #1e293b;
   --text-2: #4b5563;
@@ -41,6 +41,13 @@
   /* --err clears 4.5:1 on --surface but only 3.6:1 on its own --err-soft, so the
      sentence that sits on that fill reads its own value. */
   --err-text: #b91c1c;
+  /* The confirm dialog's destructive action is the primary one there, so it is filled
+     like --primary. --err itself is the value that carries white text (4.82:1); the
+     soft fill is a warning tone, and a button wearing it reads as a warning, not a
+     button. Hover is the same red-700 the outline's label already uses. */
+  --err-btn: #dc2626;
+  --err-btn-hover: #b91c1c;
+  --err-btn-text: #ffffff;
   /* The config's muted grey, one step darker: at #6b7280 it is 4.39:1 on the page. */
   --placeholder: #667085;
   /* The scrollbar is a control, so WCAG 1.4.11 applies: 3:1 against what it sits on.
@@ -100,6 +107,11 @@
   --err: #f87171;
   --err-soft: #450a0a;
   --err-text: #f87171;
+  /* Filled, the light fill carries the config's dark foreground rather than white
+     text, like every other filled button in this theme. */
+  --err-btn: #f87171;
+  --err-btn-hover: #fca5a5;
+  --err-btn-text: #0f172a;
   --placeholder: #8b95a3;
   /* Quietest passing value, not the brightest: a scrollbar should sit close to the
      surface. Clears 3:1 on all three dark surfaces. */
@@ -140,9 +152,12 @@
     --err: #f87171;
     --err-soft: #450a0a;
     --err-text: #f87171;
+    --err-btn: #f87171;
+    --err-btn-hover: #fca5a5;
+    --err-btn-text: #0f172a;
     --placeholder: #8b95a3;
     /* Same values as [data-theme="dark"]: a user who never picked a theme and whose OS
-       is dark must not get the light palette. tools/check-contrast.mjs fails the build
+       is dark must not get the light palette. scripts/check-contrast.mjs fails the build
        if these two blocks drift apart. */
     --scroll-thumb: #6b7b90;
     --scroll-thumb-hover: #8494a8;
@@ -263,7 +278,6 @@ code { font-family: var(--font-mono); }
 .rail > * { max-width: 34rem; margin-inline: auto; }
 .app--editor .rail > * { max-width: none; margin-inline: 0; }
 
-.rail__head { }
 /* Brand row. The toggle stays attached to the rail in both states. */
 .rail__top { display: flex; align-items: center; gap: 0.6rem; }
 .rail__top .rail__brand { flex: 1; min-width: 0; }
@@ -640,6 +654,19 @@ code { font-family: var(--font-mono); }
    card, and on its own soft fill. */
 .button--danger { color: var(--err-text); border-color: var(--err); }
 .button--danger:hover { color: var(--err-text); background: var(--err-soft); border-color: var(--err); }
+/* The one destructive action that is the point of its dialog, so it is filled like
+   --primary. The small trash icons keep the outline above: a row of filled red
+   squares in a list would shout. */
+.button--danger-solid {
+  color: var(--err-btn-text);
+  background: var(--err-btn);
+  border: 1.5px solid var(--err-btn);
+  font-weight: 600;
+}
+.button--danger-solid:hover:not(:disabled) {
+  background: var(--err-btn-hover);
+  border-color: var(--err-btn-hover);
+}
 /* On the soft fill the plain --accent is 3.63:1, so the active label reads --accent-text. */
 .button--active { color: var(--accent-text); border-color: var(--accent); background: var(--accent-soft); }
 
@@ -832,8 +859,9 @@ code { font-family: var(--font-mono); }
 /* --------------------------------------------------------- model picker */
 
 /* A native <dialog>: top layer, focus trap, Escape and backdrop come from the browser.
-   display/overlay are discrete, so allow-discrete defers them to the transition's end. */
-.model-picker {
+   display/overlay are discrete, so allow-discrete defers them to the transition's end.
+   The confirm dialog shares the shell and overrides its own width below. */
+.model-picker, .connections, .confirm {
   width: min(52rem, 92vw);
   max-width: none;
   max-height: min(86dvh, 48rem);
@@ -851,7 +879,7 @@ code { font-family: var(--font-mono); }
   transition: opacity 180ms ease, scale 240ms var(--spring), translate 240ms var(--spring),
     display 240ms allow-discrete, overlay 240ms allow-discrete;
 }
-.model-picker[open] {
+.model-picker[open], .connections[open], .confirm[open] {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -859,21 +887,31 @@ code { font-family: var(--font-mono); }
   scale: 1;
   translate: 0 0;
 }
-@starting-style { .model-picker[open] { opacity: 0; scale: 0.97; translate: 0 0.6rem; } }
-.model-picker::backdrop {
+@starting-style { .model-picker[open], .connections[open], .confirm[open] { opacity: 0; scale: 0.97; translate: 0 0.6rem; } }
+.model-picker::backdrop, .connections::backdrop, .confirm::backdrop {
   background: rgb(15 23 42 / 0);
   transition: background-color 240ms ease, display 240ms allow-discrete, overlay 240ms allow-discrete;
 }
-.model-picker[open]::backdrop { background: rgb(15 23 42 / 0.55); }
-@starting-style { .model-picker[open]::backdrop { background: rgb(15 23 42 / 0); } }
+.model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop { background: rgb(15 23 42 / 0.55); }
+@starting-style { .model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop { background: rgb(15 23 42 / 0); } }
 
 /* The page behind is inert, but a wheel over the backdrop still scrolls it. */
-body:has(.model-picker[open]) { overflow: hidden; }
+body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[open]) { overflow: hidden; }
 
 .model-picker__head { display: flex; align-items: flex-start; gap: 0.75rem; }
 .model-picker__title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
 .model-picker__sub { margin-top: 0.15rem; font-size: 0.8rem; color: var(--text-3); }
 .model-picker__head .button { margin-left: auto; }
+
+/* --------------------------------------------------------------- confirm */
+
+/* One size smaller than the picker: a question, not a workspace. Every action it
+   guards discards something, so the answering button is the filled danger and the
+   title asks the question the message answers. */
+.confirm { width: min(28rem, 92vw); }
+.confirm__title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
+.confirm__message { font-size: 0.875rem; color: var(--text-2); }
+.confirm__foot { display: flex; justify-content: flex-end; gap: 0.5rem; }
 
 .model-picker__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .model-picker__filter {
@@ -896,6 +934,96 @@ body:has(.model-picker[open]) { overflow: hidden; }
 }
 .model-picker__count { margin-left: auto; }
 .model-picker__count:empty { display: none; }
+
+/* ------------------------------------------------------------ connections */
+
+/* The saved-endpoint rows. The shell above is shared with the picker; only the row
+   shape is new, and it borrows the field-card grammar: a label column, then controls. */
+.connections__head { display: flex; align-items: flex-start; gap: 0.75rem; }
+.connections__title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
+.connections__sub { margin-top: 0.15rem; font-size: 0.8rem; color: var(--text-3); }
+.connections__head .button { margin-left: auto; }
+
+.connections__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.6rem;
+  /* No max-height of its own: the dialog is already capped, and two caps meant a
+     second card could be cut by a scroller that never needed to appear. */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 0.15rem 0.5rem 0;
+}
+
+.conn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.8rem 0.9rem;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  transition: border-color var(--transition);
+}
+.conn:hover { border-color: var(--border-strong); }
+
+/* The name is the card's title, so it takes the first line with its badges; the
+   three values line up under it on one shared label column. */
+.conn__head { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.conn__badges { display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; flex: 0 0 auto; }
+.conn__head .conn__field--name { flex: 1 1 auto; }
+
+/* Every value row is the same two-track grid — label column, control column — so the
+   labels sit on one axis down the card. Each row carries its own copy of the tracks
+   rather than one shared grid: a <label> kept as a real box keeps its input
+   association, which display: contents would put at risk. */
+.conn__body { display: flex; flex-direction: column; gap: 0.45rem; }
+.conn__field {
+  display: grid;
+  grid-template-columns: minmax(0, 6rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+.conn__label { font-size: 0.78rem; color: var(--text-2); }
+
+.conn__row { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.conn__row .conn__input { flex: 1 1 auto; }
+/* Reveal controls, hidden as one block: the input keeps its width when they go. */
+.conn__tools { display: flex; align-items: center; gap: 0.4rem; flex: 0 0 auto; }
+.conn__tools[hidden] { display: none; }
+
+.conn__input {
+  min-width: 0;
+  height: var(--ctl);
+  padding: 0 0.65rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+.conn__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--surface);
+}
+.conn__input::placeholder { color: var(--placeholder); }
+
+/* The row's own actions sit at the card's foot, on the same right edge as everything
+   else, instead of being pushed around by the badges on the title line. */
+.conn__foot { display: flex; align-items: center; gap: 0.4rem; }
+.conn__apply { margin-left: auto; }
+
+.connections__foot { display: flex; align-items: center; gap: 0.5rem; }
+.connections__foot .button--primary { margin-left: auto; }
+.connections__count:empty { display: none; }
+.connections__note { overflow-wrap: anywhere; }
 
 .check {
   display: inline-flex;
@@ -1131,9 +1259,9 @@ body:has(.model-picker[open]) { overflow: hidden; }
   /* popover=manual puts it in the top layer; these undo the UA box it arrives with. */
   inset: auto;
   margin: 0;
-  left: 50%;
-  bottom: 1.5rem;
-  max-width: min(42rem, calc(100vw - 2rem));
+  right: 1.5rem;
+  top: 1.5rem;
+  max-width: min(42rem, calc(100vw - 3rem));
   padding: 0.85rem 1.25rem;
   font-size: 0.875rem;
   color: var(--text);
@@ -1142,7 +1270,7 @@ body:has(.model-picker[open]) { overflow: hidden; }
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   opacity: 0;
-  transform: translate(-50%, 1rem);
+  transform: translate(0, -1rem);
   pointer-events: none;
   transition: opacity 200ms ease, transform 200ms ease;
   /* No z-index can lift a toast over a modal <dialog>: that lives in the top layer, where
@@ -1151,11 +1279,15 @@ body:has(.model-picker[open]) { overflow: hidden; }
      only the fallback path for a browser without the popover API. */
   z-index: 100;
 }
-.toast--shown { opacity: 1; transform: translate(-50%, 0); }
+.toast--shown { opacity: 1; transform: translate(0, 0); }
 /* display: none until shown, so the fade needs a starting point of its own. */
 @starting-style {
-  .toast--shown { opacity: 0; transform: translate(-50%, 1rem); }
+  .toast--shown { opacity: 0; transform: translate(0, -1rem); }
 }
+/* The result is the colour: green when it worked, red when it did not. Same token
+   pair a badge sits on, so the contrast gate covers both. */
+.toast--ok { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-text); }
+.toast--error { color: var(--err-text); background: var(--err-soft); border-color: var(--err-text); }
 
 /* ------------------------------------------------------------ animations */
 
@@ -1214,8 +1346,9 @@ body:has(.model-picker[open]) { overflow: hidden; }
   .app--editor .tool-picker .tool-card { padding: 0.5rem 0.55rem; }
   .app--editor .rail__note { order: 3; flex: 1 0 100%; }
   .app--editor .main { --pad: 1rem; }
-  /* Above the scroll-to-top button rather than under it. */
-  .toast { bottom: 5.25rem; }
+  /* The toast is nearly full-width here, so it centers rather than hugging a corner.
+     Both insets plus auto margins, not left: 50% — that would halve the width it may use. */
+  .toast { left: 1.5rem; right: 1.5rem; width: fit-content; margin-inline: auto; }
 }
 
 @media (max-width: 640px) {
@@ -1233,7 +1366,7 @@ body:has(.model-picker[open]) { overflow: hidden; }
   .app:not(.app--editor) .rail__action-label { display: none; }
   .provider-group__rows { grid-template-columns: 1fr; }
   /* The picker becomes the screen: a long list wants the whole window. */
-  .model-picker {
+  .model-picker, .connections {
     inset: 0;
     /* Not `width: auto`: with inset 0 the used width came out as the content's
        min-content width (476px on a 390px screen), so the dialog hung off the
@@ -1251,6 +1384,21 @@ body:has(.model-picker[open]) { overflow: hidden; }
      widen the dialog. */
   .model-picker__note { overflow-wrap: anywhere; }
   .model-picker__bar, .model-picker__list { min-width: 0; }
+  /* A phone has no room for a label column on a saved endpoint either. */
+  .conn__field { grid-template-columns: 1fr; gap: 0.2rem; }
+  /* The badges drop under the name, so the input keeps the full width. */
+  .conn__head { flex-wrap: wrap; }
+  .conn__head .conn__field--name { flex: 1 1 100%; }
+  .conn__badges { justify-content: flex-start; }
+  /* The dialog is the screen here and the page behind it cannot scroll, so the list
+     takes the leftover height and scrolls inside it — otherwise the last row hides
+     under the footer with no way to reach it. */
+  .connections { height: 100dvh; overflow: hidden; }
+  .connections__list { flex: 1 1 auto; min-height: 0; max-height: none; }
+  /* Two rows, not one: four controls on a phone push Save off the edge. */
+  .connections__foot { display: grid; grid-template-columns: 1fr 1fr; }
+  .connections__foot .button--primary { margin-left: 0; }
+  .connections__count { justify-self: start; align-self: center; }
   /* A tooltip is absolutely positioned, but it still counts as scrollable overflow:
      anchored to the right of a card it made the whole page scroll sideways on a
      phone. Grow it leftward from the button and cap it to the viewport. */
@@ -1279,7 +1427,7 @@ body:has(.model-picker[open]) { overflow: hidden; }
 /* All of it is decoration on a state change that already happened. */
 @media (prefers-reduced-motion: reduce) {
   .rail, .actionbar, .tool-card, .tool-card__icon, .button, .field-card, .to-top,
-  .model-row, .model-picker, .rail__action, .model-row__test, .hint, .hint::after {
+  .model-row, .model-picker, .connections, .rail__action, .model-row__test, .hint, .hint::after {
     transition: none;
   }
   .app--editor .main, .field-card, .other-vars, .tool-card, .rail__brand, .rail__lede,

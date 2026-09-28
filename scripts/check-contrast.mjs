@@ -1,7 +1,7 @@
 // Dev-only. Reads the colour tokens out of styles.css and checks every foreground /
 // background pair the stylesheet actually paints, plus that the three theme blocks
 // stay in step. Editing a hex is what this catches.
-//   node tools/check-contrast.mjs [path/to/styles.css]
+//   node scripts/check-contrast.mjs [path/to/styles.css]
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -74,6 +74,7 @@ const PAIRS = [
   ['text-3', 'bg', 4.5], ['text-3', 'surface', 4.5], ['text-3', 'surface-2', 4.5], ['text-3', 'accent-soft', 4.5],
   ['placeholder', 'bg', 4.5], ['placeholder', 'surface', 4.5],
   ['accent-btn-text', 'accent-btn', 4.5],
+  ['err-btn-text', 'err-btn', 4.5], ['err-btn-text', 'err-btn-hover', 4.5],
   ['accent-text', 'accent-soft', 4.5],
   ['ok-text', 'ok-soft', 4.5], ['warn-text', 'warn-soft', 4.5], ['err-text', 'err-soft', 4.5],
   ['err-text', 'surface', 4.5],

@@ -2,7 +2,7 @@
 // and asserts the contract on both screens: the landing shows one Scan button that
 // goes straight to the form, the form shows the nine env fields plus anything else
 // in env, and every non-env key is carried through untouched.
-//   node tools/check-ui.mjs
+//   node scripts/check-ui.mjs
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +10,28 @@ import { dirname, join } from 'node:path';
 import os from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const html = readFileSync(join(HERE, '..', 'index.html'), 'utf8');
-const js = stripTypeScriptTypes(readFileSync(join(HERE, '..', 'app.ts'), 'utf8'), { mode: 'strip' });
+const ROOT = join(HERE, '..');
+const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+
+// Load app.ts and every module it imports, concatenating them in DFS post-order
+// (the order ES modules evaluate in, cycles included). Imports are stripped and
+// export keywords dropped, so the result runs as one classic script exactly like
+// before the split — and the __api patch at the bottom still finds every name.
+const IMPORT_RE = /^import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'([^']+)';?\s*$|^import\s+'([^']+)';?\s*$/gm;
+const seen = new Set();
+const parts = [];
+function visit(file) {
+  if (seen.has(file)) return;
+  seen.add(file);
+  let src = stripTypeScriptTypes(readFileSync(file, 'utf8'), { mode: 'strip' });
+  const deps = [];
+  src = src.replace(IMPORT_RE, (m, a, b) => { deps.push(a || b); return ''; });
+  for (const d of deps) visit(join(dirname(file), d.replace(/\.js$/, '.ts')));
+  src = src.replace(/^export\s+(const|let|function|async function|class)\s/gm, '$1 ');
+  parts.push(src);
+}
+visit(join(ROOT, 'app.ts'));
+const js = parts.join('\n');
 
 // --- DOM shim ---------------------------------------------------------------
 class El {
@@ -69,9 +89,14 @@ class El {
   fire(type, ev = {}) { if (this._on && this._on[type]) this._on[type]({ target: this, preventDefault() {}, ...ev }); }
   click() { this.fire('click'); }
   // A modal dialog. The shim tracks `open` the way the browser does, so a check can
-  // tell "the picker is up" from "the picker is closed".
+  // tell "the picker is up" from "the picker is closed". close(value) mirrors the real
+  // element: it records the return value and fires the close event.
   showModal() { this.open = true; this.attrs.open = ''; }
-  close() { this.open = false; this.attrs.open = undefined; }
+  close(value) {
+    this.open = false; this.attrs.open = undefined;
+    if (value !== undefined) this.returnValue = value;
+    this.fire('close');
+  }
   removeAttribute(k) { delete this.attrs[k]; if (k === 'open') this.open = false; }
   // The real DOM accepts a raw string as a child and makes a text node of it. The
   // shim has to do the same or a mixed node/string child list silently loses the
@@ -183,8 +208,9 @@ globalThis.document = {
 const hook = name => jsHooks[name] || (jsHooks[name] = new El('div'));
 // A field input, looked up the way the page does.
 const inputFor = key => docRoot.querySelector(`[data-field="${key}"]`);
+// A saved-endpoint row's input, by row index and field name.
+const connInput = (i, field) => docRoot.querySelector(`[data-conn="${i}:${field}"]`);
 globalThis.addEventListener = () => {};
-globalThis.confirm = () => true;
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
 
@@ -240,6 +266,17 @@ const modelPosted = [];          // the {baseUrl, apiKey} the pane sent
 // Per-case reply for /api/test-model, and what the last call sent.
 let testReply = { ok: true, ms: 100 };
 let tested = null;
+// Saved endpoints. The list reply deliberately carries no token — the shim has to
+// look like the server, or a check would pass against a page that never asks.
+let connReply = { file: join(HOME, '.config-reader', 'connections.json'), exists: true, atRest: false,
+  profiles: [
+    { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a-model', hasKey: true },
+    { name: 'remote', baseUrl: 'https://ai.example', model: 'ag/opus-4[1m]', hasKey: false },
+  ] };
+let revealReply = { apiKey: 'sk-from-store' };
+const connPosted = [];
+let connGets = 0;      // how many times the dialog read the store
+let revealed = null;
 // Per-case overrides for the claude GET reply, so a banner path can be exercised.
 let claudeOverride = {};
 let modelReply = {
@@ -313,6 +350,12 @@ globalThis.fetch = async (url, opts = {}) => {
     tested = JSON.parse(opts.body || '{}');
     tested.calls = (tested.calls || 0) + 1;
     body = testReply;
+  } else if (r.includes('/api/connections/reveal')) {
+    revealed = JSON.parse(opts.body || '{}');
+    body = revealReply;
+  } else if (r.includes('/api/connections')) {
+    if (opts.method === 'POST') { connPosted.push(JSON.parse(opts.body || '{}')); body = { ok: true, count: connPosted.at(-1).profiles.length }; }
+    else { connGets++; body = connReply; }
   } else if (r.includes('/api/settings')) {
     const tool = toolOf(r);
     if (opts.method === 'POST') {
@@ -343,6 +386,18 @@ await settle();
 
 const api = globalThis.__api;
 const results = [];
+
+// The confirm dialog is answered the moment it opens: the flows that pass through it
+// (discard-and-switch, apply-over-dirty) expect the old `confirm: yes` behaviour. A
+// test that wants to inspect the dialog itself turns confirmAuto off and clicks the
+// buttons by hand.
+let confirmAuto = true;
+const confirmDlg = hook('confirm');
+const realShowModal = confirmDlg.showModal.bind(confirmDlg);
+confirmDlg.showModal = () => {
+  realShowModal();
+  if (confirmAuto) hook('confirm-ok').click();
+};
 const ok = (name, pass, detail = '') => results.push({ name, pass, detail });
 
 // ---- screen 1: the picker, closed ----------------------------------------
@@ -1195,6 +1250,170 @@ hook('editor-back').fire('click');
 ok('the sidebar back button lands on the picker, not the previous tool',
   !hook('app').className.includes('app--editor') && location.hash === '',
   `open=${!hook('editor').hidden} hash=${location.hash}`);
+
+// ---- saved endpoints -------------------------------------------------------
+// A second dialog, on the same rules as the model picker: it fills the form, it never
+// writes, and a token only travels when a row is applied. The block above ended on the
+// picker, so open a tool first: Apply is only offered where there is a form to fill.
+hook('tool-picker').children[0].fire('click');
+await settle();
+ok('the rail offers the saved endpoints', !!hook('connections-open'));
+ok('the dialog starts closed', hook('connections').open !== true);
+ok('nothing was fetched before it was opened', connGets === 0, `${connGets} reads`);
+
+hook('connections-open').fire('click');
+await settle();
+ok('opening the dialog reads the store once', connGets === 1, `${connGets} reads`);
+ok('a row is drawn per saved endpoint', hook('connections-list').querySelectorAll('.conn').length === 2,
+  String(hook('connections-list').querySelectorAll('.conn').length));
+ok('a row shows its name', !!connInput(0, 'name') && connInput(0, 'name').value === 'local',
+  connInput(0, 'name') ? connInput(0, 'name').value : '(no input)');
+ok('a row shows its base URL', connInput(0, 'baseUrl')?.value === 'http://localhost:20128', connInput(0, 'baseUrl')?.value || '(no input)');
+// The order is the order every tool asks for, and the token is never named "key".
+const connLabels = () => [...hook('connections-list').querySelectorAll('.conn')[0].querySelectorAll('.conn__label')]
+  .map(e => e.textContent).join(' → ');
+ok('the values read base URL, auth token, model', connLabels() === 'Name → Base URL → Auth token → Model', connLabels());
+ok('the token field is never filled from the list reply',
+  connInput(0, 'apiKey')?.value === '' && connInput(0, 'apiKey')?.type === 'password',
+  `${connInput(0, 'apiKey')?.value} / ${connInput(0, 'apiKey')?.type}`);
+ok('a row with a stored key says so', hook('connections-list').querySelectorAll('.badge--ok').length >= 1,
+  String(hook('connections-list').querySelectorAll('.badge--ok').length));
+
+// Apply, on a tool that is open: the form is filled, the file is not written.
+api.setEnv('ANTHROPIC_BASE_URL', '');
+api.setEnv('ANTHROPIC_MODEL', '');
+api.setEnv('ANTHROPIC_AUTH_TOKEN', '');
+const postsBeforeApply = posted.length;   // earlier blocks in this suite save too
+const applyBtns = hook('connections-list').querySelectorAll('.conn__apply');
+ok('every row offers Apply while a tool is open', applyBtns.length === 2, `${applyBtns.length} buttons`);
+if (applyBtns.length) {
+  applyBtns[0].fire('click');
+  await settle();
+}
+ok('apply asks the server for that one row\'s token', !!revealed && revealed.name === 'local', JSON.stringify(revealed));
+ok('apply fills the base URL', api.env().ANTHROPIC_BASE_URL === 'http://localhost:20128', api.env().ANTHROPIC_BASE_URL);
+ok('apply fills the token', api.env().ANTHROPIC_AUTH_TOKEN === 'sk-from-store');
+ok('apply closes the dialog', hook('connections').open !== true);
+ok('apply never wrote a config', posted.length === postsBeforeApply, `${posted.length - postsBeforeApply} posts`);
+ok('apply marks the form dirty, so Save is the write',
+  hook('actionbar-dot').className.includes('actionbar__dot--dirty'), hook('actionbar-dot').className);
+
+// Claude Code reads the [1m] marker, so an apply there must keep it.
+hook('connections-open').fire('click');
+await settle();
+if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
+  hook('connections-list').querySelectorAll('.conn__apply')[1].fire('click');
+  await settle();
+}
+ok('apply keeps a [1m] marker for the tool that reads it',
+  api.env().ANTHROPIC_MODEL === 'ag/opus-4[1m]', api.env().ANTHROPIC_MODEL);
+
+// The other tools read the bare id, so an apply there strips the marker.
+hook('editor-back').fire('click');
+await settle();
+hook('tool-picker').children[1].fire('click');          // Codex, a simple-mode tool
+await settle();
+hook('connections-open').fire('click');
+await settle();
+if (hook('connections-list').querySelectorAll('.conn__apply')[1]) {
+  hook('connections-list').querySelectorAll('.conn__apply')[1].fire('click');
+  await settle();
+}
+ok('apply strips a [1m] marker the target tool does not read',
+  api.values().model === 'ag/opus-4', api.values().model);
+
+// A token the user types is stored; a row left blank keeps the stored one.
+hook('connections-open').fire('click');
+await settle();
+if (connInput(1, 'apiKey')) {
+  connInput(1, 'apiKey').value = 'sk-typed';
+  connInput(1, 'apiKey').fire('input');
+  const revealBtn = connInput(1, 'apiKey').parentNode.querySelectorAll('.button--ghost')[0];
+  ok('the row offers a reveal button', !!revealBtn);
+  revealBtn.fire('click');
+  ok('the reveal button shows the token', connInput(1, 'apiKey').type === 'text', connInput(1, 'apiKey').type);
+  revealBtn.fire('click');
+  ok('the reveal button hides it again', connInput(1, 'apiKey').type === 'password', connInput(1, 'apiKey').type);
+} else {
+  ok('the row offers a reveal button', false, 'no second row to edit');
+}
+hook('connections-save').fire('click');
+await settle();
+ok('saving posts the working copy', connPosted.length === 1 && connPosted[0].profiles.length === 2,
+  JSON.stringify(connPosted[0] || null));
+ok('a typed token is sent', connPosted[0]?.profiles[1]?.apiKey === 'sk-typed');
+ok('a row left untouched sends no key at all', connPosted[0]?.profiles[0]?.apiKey === undefined,
+  JSON.stringify(connPosted[0]?.profiles[0] ?? null));
+
+// Escape must not throw a typed token away without asking.
+if (connInput(0, 'name')) {
+  connInput(0, 'name').value = 'renamed';
+  connInput(0, 'name').fire('input');
+} else {
+  ok('a name field exists to edit', false, 'no row');
+}
+confirmAuto = false;                    // this test inspects the dialog itself
+hook('connections').fire('cancel', { preventDefault() {} });
+await settle();
+ok('escape on a dirty dialog asks first', hook('confirm').open === true);
+ok('the question names the loss', /Discard/.test(hook('confirm-title').textContent),
+  hook('confirm-title').textContent);
+hook('confirm-cancel').fire('click');
+await settle();
+ok('a refused cancel leaves the dialog open', hook('connections').open === true && hook('confirm').open !== true);
+hook('connections').fire('cancel', { preventDefault() {} });
+await settle();
+hook('confirm-ok').fire('click');
+await settle();
+ok('a confirmed cancel closes it', hook('connections').open !== true);
+confirmAuto = true;
+
+// The landing has no form to fill, so Apply is not offered there.
+hook('editor-back').fire('click');
+hook('connections-open').fire('click');
+await settle();
+ok('the landing draws the saved endpoints too', hook('connections-list').querySelectorAll('.conn').length === 2);
+ok('the landing offers no Apply', hook('connections-list').querySelectorAll('.conn__apply').length === 0);
+ok('the landing offers no capture either', hook('connections-capture').hidden === true);
+ok('the dialog says what Apply would do', /Open a tool/.test(hook('connections-sub').textContent),
+  hook('connections-sub').textContent);
+hook('connections-close').fire('click');
+
+// ---- capturing the form: the tool is often configured before the store is -------
+// A form already pointed at an endpoint is the normal case — by hand, by an earlier
+// session, by another tool. Reading it back has to be one gesture.
+hook('tool-picker').children[0].fire('click');
+await settle();
+api.setEnv('ANTHROPIC_BASE_URL', 'http://localhost:20128/v1');
+api.setEnv('ANTHROPIC_MODEL', 'ag/opus-4[1m]');
+api.setEnv('ANTHROPIC_AUTH_TOKEN', 'sk-from-the-form');
+hook('connections-open').fire('click');
+await settle();
+const before = hook('connections-list').querySelectorAll('.conn').length;
+ok('the capture button is offered while a tool is open', hook('connections-capture').hidden !== true);
+hook('connections-capture').fire('click');
+await settle();
+ok('capture adds one row', hook('connections-list').querySelectorAll('.conn').length === before + 1,
+  `${before} → ${hook('connections-list').querySelectorAll('.conn').length}`);
+const last = before;
+ok('capture reads the base URL off the form', connInput(last, 'baseUrl')?.value === 'http://localhost:20128/v1',
+  connInput(last, 'baseUrl')?.value || '(none)');
+ok('capture reads the token off the form', connInput(last, 'apiKey')?.value === 'sk-from-the-form',
+  connInput(last, 'apiKey')?.value || '(none)');
+ok('capture keeps the [1m] marker', connInput(last, 'model')?.value === 'ag/opus-4[1m]',
+  connInput(last, 'model')?.value || '(none)');
+ok('capture names the row after the host', connInput(last, 'name')?.value === 'localhost:20128',
+  connInput(last, 'name')?.value || '(none)');
+// A second capture of the same endpoint must not collide with the first.
+hook('connections-capture').fire('click');
+await settle();
+ok('a second capture of the same endpoint gets its own name',
+  connInput(last + 1, 'name')?.value === 'localhost:20128 (2)', connInput(last + 1, 'name')?.value || '(none)');
+hook('connections-save').fire('click');
+await settle();
+ok('captured rows are posted like any other', connPosted.at(-1)?.profiles.length === before + 2,
+  JSON.stringify(connPosted.at(-1)?.profiles?.length ?? null));
+ok('a captured token travels to the server', connPosted.at(-1)?.profiles[last]?.apiKey === 'sk-from-the-form');
 
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
 const failed = results.filter(r => !r.pass).length;

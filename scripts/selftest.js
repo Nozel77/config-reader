@@ -1,20 +1,13 @@
 // Extracted from server.js: the whole selftest, so the server it exercises stays about
-// serving. Run it with `node tools/selftest.js`, or `node server.js --selftest`.
+// serving. Run it with `node scripts/selftest.js`, or `node server.js --selftest`.
 const {
   missing,
-  http,
   fs,
   path,
   os,
   HERE,
-  INDEX,
-  APP_TS,
   ICONS,
   configDir,
-  hermesHome,
-  codexHome,
-  opencodeDir,
-  MAX_BODY,
   appJs,
   detectEol,
   settingsFile,
@@ -23,75 +16,42 @@ const {
   hasBin,
   toolList,
   toolPaths,
-  PROVIDER,
-  PROVIDER_LABEL,
   scanInfo,
   readSettings,
   BACKUPS,
   backupBeforeWrite,
-  sleep,
   atomicWrite,
-  readText,
   withV1,
-  tomlString,
-  tomlUnquote,
   tomlTopValue,
-  tomlSectionValues,
   tomlSetTop,
   tomlSetSection,
-  tomlSetInSection,
-  codexKey,
   codexRead,
   codexWrite,
-  jsoncParse,
   opencodeRead,
   opencodeWrite,
-  HERMES_MODEL_RE,
-  HERMES_DELEGATION_RE,
-  HERMES_AUX_RE,
-  HERMES_ROLES,
-  hermesRoleRe,
-  hermesBlockValue,
   hermesRead,
-  hermesPatchBlock,
-  hermesBuildBlock,
-  hermesSetTopBlock,
-  hermesSetRole,
   hermesWrite,
   envVarSet,
-  readSimple,
-  writeSimple,
-  send,
-  isUp,
-  openBrowser,
-  originOk,
-  readBody,
-  jsonBody,
   modelsUrl,
   chatUrl,
   psQuote,
   vbsLauncher,
-  installShortcutWindows,
   execQuote,
   shQuote,
   installShortcutLinux,
   installShortcutMac,
   resolveDirArg,
   desktopDirWin,
-  installShortcut,
   modelWindows,
-  VISION_TRUE_TOKENS,
-  visionFromModalities,
-  VISION_BOOL_KEYS,
-  VISION_MOD_KEYS,
-  rowVision,
   modelVision,
-  num,
   modelCaps,
-  handler,
-  main,
+  connectionsFile,
+  readConnections,
+  writeConnections,
+  protectSecret,
+  revealSecret,
+  secretsAtRest,
   stripTypeScriptTypes,
-  spawn,
   spawnSync,
 } = require('../server.js');
 // ------------------------------------------------------------------- selftest
@@ -215,14 +175,82 @@ function selftest() {
     listed.every(t => t.installed === hasBin(t.bin)),
     listed.map(t => `${t.id}:${t.installed}`).join(' '));
 
-  // 5. app.ts strips to something the browser can actually parse
+  // 5. the frontend: the entry strips, every import names a real module file, and
+  //    the types are gone. The full graph is parsed and run by check-ui.mjs — the
+  //    entry alone cannot be `new Function`-ed any more: it is an ES module now.
   try {
     const js = appJs();
-    new Function(js);
     ok('app.ts strips to valid JS', js.length > 1000, `${js.length} bytes`);
-    ok('types are gone from the output', !/\binterface Field\b/.test(js));
+    const fieldsSrc = fs.readFileSync(path.join(HERE, 'app', 'fields.ts'), 'utf8');
+    const fieldsJs = stripTypeScriptTypes(fieldsSrc, { mode: 'strip' });
+    ok('types are gone from the output', /\binterface Field\b/.test(fieldsSrc) && !/\binterface Field\b/.test(fieldsJs));
+    const missing = [];
+    const seenFiles = new Set();
+    const walk = file => {
+      if (seenFiles.has(file)) return;
+      seenFiles.add(file);
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/from\s+'(\.[^']+)'/g)) {
+        const f = path.join(path.dirname(file), m[1].replace(/\.js$/, '.ts'));
+        if (fs.existsSync(f)) walk(f); else missing.push(m[1]);
+      }
+    };
+    walk(path.join(HERE, 'app.ts'));
+    ok('every frontend import resolves to a module file', missing.length === 0 && seenFiles.size > 5,
+      missing.join(' ') || `${seenFiles.size} modules`);
   } catch (e) {
     ok('app.ts strips to valid JS', false, e.message);
+  }
+
+  // 6. every module imports the shared names it uses. A missing import is a runtime
+  //    ReferenceError in the browser, and the harness cannot see it — it concatenates
+  //    every module into one scope, so check-ui passes either way. This is the gate
+  //    for that class of bug.
+  try {
+    const appDir = path.join(HERE, 'app');
+    const files = fs.readdirSync(appDir).filter(f => f.endsWith('.ts')).map(f => path.join(appDir, f));
+    files.push(path.join(HERE, 'app.ts'));
+    const shared = new Set();
+    const byFile = new Map();
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const names = new Set([...src.matchAll(/^export\s+(?:const|let|function|async function|class)\s+(\w+)/gm)].map(m => m[1]));
+      byFile.set(file, names);
+      for (const n of names) shared.add(n);
+    }
+    const missed = [];
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const imported = new Set();
+      for (const m of src.matchAll(/\bimport\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s/g)) {
+        const brace = /\{([^}]*)\}/.exec(m[0]);
+        if (brace) for (const part of brace[1].split(',')) {
+          const n = part.trim().split(/\s+/)[0].replace(/^type\s+/, '');
+          if (n) imported.add(n);
+        }
+        const star = /\*\s+as\s+(\w+)/.exec(m[0]);
+        if (star) imported.add(star[1]);
+        const def = /\bimport\s+(\w+)\s+from/.exec(m[0]);
+        if (def) imported.add(def[1]);
+      }
+      const declared = new Set([...byFile.get(file), ...imported]);
+      for (const m of src.matchAll(/\b(?:const|let|var|function)\s+(\w+)/g)) declared.add(m[1]);
+      // Strings, comments and template-literal prose are not uses; a template's
+      // ${...} interpolations are kept, because those are real expressions.
+      // Object keys and type annotations (`tools:`, `values?:`) are not uses either.
+      const code = src
+        .replace(/'[^'\n]*'/g, "''")
+        .replace(/"[^"\n]*"/g, '""')
+        .replace(/`([^`]*)`/g, (m, body) => (body.match(/\$\{[^}]*\}/g) || []).join(' '))
+        .replace(/\/\/[^\n\r]*/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const name of shared) {
+        if (declared.has(name)) continue;
+        if (new RegExp(`(?:^|[^\\w.$])${name}(?![\\w.$:?])`).test(code)) missed.push(`${path.basename(file)}:${name}`);
+      }
+    }
+    ok('every frontend module imports the shared names it uses', missed.length === 0, missed.join(' ') || `${shared.size} shared names`);
+  } catch (e) {
+    ok('every frontend module imports the shared names it uses', false, e.message);
   }
 
   // 6. EOL is detected per file, not assumed from the platform. Claude Code writes
@@ -503,9 +531,9 @@ function selftest() {
   // The +x bit is a POSIX concept; on Windows chmod can only touch the read-only
   // flag, so the mode is checked where it means something and the source where it
   // does not. Either way the chmodSync call itself is asserted — and it is asserted
-  // in server.js, which is where installShortcutLinux now lives: reading __filename
-  // here would only ever search this test file.
-  const shortcutSrc = fs.readFileSync(path.join(HERE, 'server.js'), 'utf8');
+  // in lib/shortcut.js, which is where installShortcutLinux now lives: reading
+  // __filename here would only ever search this test file.
+  const shortcutSrc = fs.readFileSync(path.join(HERE, 'lib', 'shortcut.js'), 'utf8');
   ok('linux: the launcher is chmod +x', process.platform === 'win32'
     ? /installShortcutLinux[\s\S]*?chmodSync\(file, 0o755\)/.test(shortcutSrc)
     : (fs.statSync(linuxFile).mode & 0o111) !== 0,
@@ -534,8 +562,6 @@ function selftest() {
     gateSrc.includes("typeof stripTypeScriptTypes !== 'function'") && !/NODE_MAJOR\s*<\s*22/.test(gateSrc));
   ok('the gate names the required minor version when it fails', gateSrc.includes('22.13'));
 
-  // 14. the Desktop the shortcut lands in. On Windows the registry is the only
-  // 14. the Desktop the shortcut lands in. On Windows the registry is the only
   // 14. the Desktop the shortcut lands in. On Windows the registry is the only
   // authoritative answer — a OneDrive-redirected Desktop is where the user actually
   // looks, while ~/Desktop can still exist as a stale folder. That stale folder is
@@ -747,6 +773,69 @@ function selftest() {
     (envVarSet('OPENAI_API_KEY=old\n', 'OPENAI_API_KEY', 'sk-h').match(/OPENAI_API_KEY=/g) || []).length === 1);
   fs.rmSync(sdir, { recursive: true, force: true });
 
+  // 14b. saved endpoints: one file under the home dir, never a path from the browser.
+  // The empty-read check runs with the home env pointed at a scratch dir: reading the
+  // real home would make this pass or fail on whatever the user happens to have saved.
+  const connDir = fs.mkdtempSync(path.join(os.tmpdir(), 'csui-conn-'));
+  const savedHomeEnv = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = connDir;
+  const connFile = connectionsFile();
+  ok('the connection store lives under the home dir',
+    connFile === path.join(connDir, '.config-reader', 'connections.json'), connFile);
+  ok('a missing store reads as empty, not as an error',
+    JSON.stringify(readConnections()) === JSON.stringify({ exists: false, profiles: [] }),
+    JSON.stringify(readConnections()));
+  ok('the store follows the home dir it is given',
+    connectionsFile() === path.join(connDir, '.config-reader', 'connections.json'), connectionsFile());
+
+  // 14c. the store's own rules: what a row is, what it drops, and what a hand-broken
+  // file does. The store path is derived from os.homedir() at call time, so pointing
+  // the home env at a scratch dir is what keeps the real one out of scope.
+  const wrote = writeConnections([
+    { name: 'local', baseUrl: 'http://localhost:20128', model: 'knr/a', extra: 'nope' },
+    { name: 'nope', baseUrl: 'not a url', model: 'x' },
+    { name: 'with key', baseUrl: 'https://ai.example', model: '', apiKey: 'sk-secret', enc: 'plain' },
+  ]);
+  ok('a row with no usable URL is dropped, not stored', wrote.profiles.length === 2, String(wrote.profiles.length));
+  ok('the store is written as JSON with a version', JSON.parse(fs.readFileSync(connectionsFile(), 'utf8')).version === 1);
+  ok('an unknown field never reaches the file', !fs.readFileSync(connectionsFile(), 'utf8').includes('"extra"'));
+  const connBack = readConnections();
+  ok('the store round-trips', connBack.profiles.length === 2 && connBack.profiles[0].name === 'local', JSON.stringify(connBack.profiles));
+  ok('a stored key is read back with its marker', connBack.profiles[1].apiKey === 'sk-secret' && connBack.profiles[1].enc === 'plain');
+
+  writeConnections([
+    { name: 'zebra', baseUrl: 'https://z.example', model: '' },
+    { name: 'alpha', baseUrl: 'https://a.example', model: '' },
+  ]);
+  ok('the store is written sorted by name',
+    readConnections().profiles.map(r => r.name).join() === 'alpha,zebra',
+    readConnections().profiles.map(r => r.name).join());
+
+  fs.writeFileSync(connectionsFile(), '{ this is not json');
+  ok('a broken store reads as empty rather than throwing', readConnections().profiles.length === 0);
+  ok('a broken store is reported as existing', readConnections().exists === true);
+
+  // 14d. the token at rest. On Windows the store is a DPAPI blob that only this user
+  // on this machine can open; everywhere else there is no key store in reach, so the
+  // token is plain and the file mode is the only restriction.
+  const prot = protectSecret('sk-test-123');
+  if (secretsAtRest()) {
+    ok('windows: a token is stored as a dpapi blob',
+      prot.enc === 'dpapi' && /^[0-9a-f]+$/i.test(prot.apiKey), `${prot.enc} len ${prot.apiKey.length}`);
+    ok('windows: the blob opens back to the token', revealSecret(prot.enc, prot.apiKey).apiKey === 'sk-test-123');
+    ok('windows: a foreign blob is refused with a sentence, not an empty token',
+      (() => { const r = revealSecret('dpapi', '00'.repeat(278)); return r.apiKey === '' && /re-enter/.test(r.keyError); })());
+  } else {
+    ok(`${process.platform}: no key store is used, so the token is stored plainly`,
+      prot.enc === 'plain' && prot.apiKey === 'sk-test-123');
+    ok(`${process.platform}: a plain row reads back as itself`, revealSecret('plain', 'sk-x').apiKey === 'sk-x');
+  }
+  ok('an empty secret is not encrypted at all', protectSecret('').enc === 'plain' && protectSecret('').apiKey === '');
+
+  if (savedHomeEnv.USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedHomeEnv.USERPROFILE;
+  if (savedHomeEnv.HOME === undefined) delete process.env.HOME; else process.env.HOME = savedHomeEnv.HOME;
+  fs.rmSync(connDir, { recursive: true, force: true });
+
   // 15. the port guard. `--port abc` reached net.listen as NaN and surfaced as a raw
   // RangeError stack; start.cmd now pauses on a non-zero exit, which would park that
   // stack in front of a double-clicking user. Asserted against the source, since the
@@ -754,6 +843,23 @@ function selftest() {
   const portSrc = fs.readFileSync(path.join(HERE, 'server.js'), 'utf8');
   ok('a bad --port is refused with a sentence, not a stack trace',
     /Number\.isInteger\(port\)/.test(portSrc) && portSrc.includes('is not a usable port'));
+
+  // 15b. a browser launcher that is not installed must not take the server with it.
+  // xdg-open is absent on a bare WSL image, and spawn reports that asynchronously as
+  // an 'error' event — unhandled, it kills the process. The convenience of opening a
+  // tab is never worth the editor. Run in a child so a regression cannot end this run.
+  const launcherSrc = fs.readFileSync(path.join(HERE, 'lib', 'http.js'), 'utf8');
+  ok('openBrowser attaches an error handler to the spawned launcher',
+    /child\.on\('error'/.test(launcherSrc), launcherSrc.includes("on('error'") ? '' : 'no error listener found');
+  // Platform-agnostic: a nonexistent binary behaves the same everywhere, and this is
+  // the shape openBrowser uses on every platform.
+  const launchProbe = spawnSync(process.execPath, ['-e',
+    "const {spawn}=require('node:child_process');"
+    + "const c=spawn('csui-not-a-real-launcher-xyz',['http://127.0.0.1:1'],{detached:true,stdio:'ignore'});"
+    + "c.on('error',()=>{});c.unref();setTimeout(()=>console.log('alive'),600);"],
+    { encoding: 'utf8', timeout: 8000 });
+  ok('a missing launcher leaves the process alive', (launchProbe.stdout || '').includes('alive'),
+    `exit ${launchProbe.status}, stderr ${(launchProbe.stderr || '').trim().split('\n')[0] || '(none)'}`);
 
   for (const c of checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}${c.detail ? `  (${c.detail})` : ''}`);
   const failed = checks.filter(c => !c.pass).length;

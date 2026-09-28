@@ -8,16 +8,18 @@ backups/
 *.tmp
 *.bak
 
-# Generated catalog (tools/build-catalog.mjs regenerates it; not used at runtime)
+# Generated catalog (scripts/build-catalog.mjs regenerates it; not used at runtime)
 catalog.json
 
-# Dev screenshots (tools/shot.mjs output; not referenced by README)
-tools/shots/
+# Dev screenshots (scripts/shot.mjs output; not referenced by README)
+scripts/shots/
 
 # Secrets — never commit tokens
 .env
 *.pem
 *.key
+connections.json
+.hermes/
 
 # Node (zero deps today; future-proofing)
 node_modules/

@@ -81,6 +81,24 @@
             </svg>
             <span class="rail__action-label">Theme</span>
           </button>
+          <button
+            class="rail__action rail__action--connections"
+            type="button"
+            data-js="connections-open"
+            title="Saved endpoints"
+            aria-label="Saved endpoints"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon">
+              <path
+                d="M6.2 9.8a3.2 3.2 0 0 0 4.5 0l2.1-2.1a3.2 3.2 0 0 0-4.5-4.5l-1 1M9.8 6.2a3.2 3.2 0 0 0-4.5 0L3.2 8.3a3.2 3.2 0 0 0 4.5 4.5l1-1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="rail__action-label">Endpoints</span>
+          </button>
           <a
             class="rail__action rail__action--repo"
             href="https://github.com/Nozel77/config-reader"
@@ -112,11 +130,7 @@
         <!-- Filled in from what the scan returned. -->
         <section class="editor" data-js="editor" hidden>
           <header class="actionbar" data-js="actionbar">
-            <span
-              class="actionbar__dot"
-              data-js="actionbar-dot"
-              title="Unsaved changes"
-            ></span>
+            <span class="actionbar__dot" data-js="actionbar-dot" title="Unsaved changes"></span>
             <code class="actionbar__path" data-js="actionbar-path"></code>
             <button
               class="button button--ghost"
@@ -126,7 +140,9 @@
             >
               Reload
             </button>
-            <button class="button button--primary" type="button" data-js="save" disabled>Save</button>
+            <button class="button button--primary" type="button" data-js="save" disabled>
+              Save
+            </button>
           </header>
 
           <h2 class="editor__title" data-js="editor-title"></h2>
@@ -150,7 +166,11 @@
                 autocomplete="off"
                 aria-label="New variable name"
               />
-              <button class="button button--ghost button--small" type="button" data-js="other-vars-add">
+              <button
+                class="button button--ghost button--small"
+                type="button"
+                data-js="other-vars-add"
+              >
                 Add
               </button>
             </div>
@@ -208,6 +228,62 @@
       <div class="model-picker__list" data-js="model-picker-list"></div>
     </dialog>
 
+    <!-- Saved endpoints: the base URL, token and default model, typed once. Apply
+         fills the editor's form; Save is still the only thing that writes a tool's
+         config. Same shell as the picker: top layer, focus trap, Escape, backdrop. -->
+    <dialog class="connections" data-js="connections" aria-labelledby="connections-title">
+      <header class="connections__head">
+        <div>
+          <h2 class="connections__title" id="connections-title">Saved endpoints</h2>
+          <p class="connections__sub" data-js="connections-sub"></p>
+        </div>
+        <button
+          class="button button--ghost button--icon"
+          type="button"
+          data-js="connections-close"
+          title="Close"
+          aria-label="Close"
+        ></button>
+      </header>
+
+      <div class="connections__list" data-js="connections-list"></div>
+
+      <footer class="connections__foot">
+        <button class="button button--ghost button--small" type="button" data-js="connections-new">
+          Add an endpoint
+        </button>
+        <button
+          class="button button--ghost button--small"
+          type="button"
+          data-js="connections-capture"
+        >
+          Save from the form
+        </button>
+        <span class="badge connections__count" data-js="connections-count"></span>
+        <button class="button button--primary" type="button" data-js="connections-save" disabled>
+          Save
+        </button>
+      </footer>
+
+      <p class="note connections__note" data-js="connections-note"></p>
+    </dialog>
+
+    <!-- One shared confirmation dialog for the actions that lose something: unsaved
+         edits, a running server, a form about to be replaced. Same shell as the
+         picker; the button that answers carries the action's own words. -->
+    <dialog class="confirm" data-js="confirm" aria-labelledby="confirm-title">
+      <header class="confirm__head">
+        <h2 class="confirm__title" id="confirm-title" data-js="confirm-title"></h2>
+      </header>
+      <p class="confirm__message" data-js="confirm-message"></p>
+      <footer class="confirm__foot">
+        <button class="button button--ghost" type="button" data-js="confirm-cancel">Cancel</button>
+        <button class="button button--danger-solid" type="button" data-js="confirm-ok">
+          Continue
+        </button>
+      </footer>
+    </dialog>
+
     <button
       class="to-top"
       data-js="to-top"
@@ -219,6 +295,6 @@
     <!-- A popover, so it can be seen over an open modal dialog: a modal lives in the top
          layer, where no z-index reaches. -->
     <div class="toast" data-js="toast" popover="manual" role="status" aria-live="polite"></div>
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
