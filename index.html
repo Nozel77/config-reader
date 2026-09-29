@@ -99,6 +99,26 @@
             </svg>
             <span class="rail__action-label">Endpoints</span>
           </button>
+          <button
+            class="rail__action rail__action--raw"
+            type="button"
+            data-js="raw-open"
+            title="Read and edit the whole file, every key"
+            aria-label="Read and edit the whole file"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="icon">
+              <path
+                d="M4 1.5h5l3 3v10H4z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linejoin="round"
+              />
+              <path d="M9 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+              <path d="M6 8.5h4M6 11h2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+            <span class="rail__action-label">Raw</span>
+          </button>
           <a
             class="rail__action rail__action--repo"
             href="https://github.com/Nozel77/config-reader"
@@ -266,6 +286,62 @@
       </footer>
 
       <p class="note connections__note" data-js="connections-note"></p>
+    </dialog>
+
+    <!-- The file as it sits on disk: every key, not only the ones the form has a field
+         for, and an editor for the ones the form does not own. The tokenizer is
+         deliberately shallow — it colours a key, a value and a comment, which is the
+         vocabulary all four formats share. -->
+    <dialog class="raw" data-js="raw" aria-labelledby="raw-title">
+      <header class="raw__head">
+        <div class="raw__headline">
+          <h2 class="raw__title" id="raw-title" data-js="raw-title">Raw view</h2>
+          <p class="raw__sub" data-js="raw-sub"></p>
+        </div>
+        <span class="actionbar__dot raw__dot" data-js="raw-dot" title="Unsaved changes" hidden></span>
+        <button
+          class="button button--ghost button--small"
+          type="button"
+          data-js="raw-edit"
+          title="Edit the file as text"
+        >
+          Edit
+        </button>
+        <button
+          class="button button--ghost button--small"
+          type="button"
+          data-js="raw-cancel"
+          title="Discard these edits"
+          hidden
+        >
+          Cancel
+        </button>
+        <button
+          class="button button--primary button--small"
+          type="button"
+          data-js="raw-save"
+          title="Write the file"
+          hidden
+        >
+          Save
+        </button>
+        <button
+          class="button button--ghost button--icon"
+          type="button"
+          data-js="raw-copy"
+          title="Copy the file to the clipboard"
+          aria-label="Copy the file"
+        ></button>
+        <button
+          class="button button--ghost button--icon"
+          type="button"
+          data-js="raw-close"
+          title="Close"
+          aria-label="Close"
+        ></button>
+      </header>
+
+      <div class="raw__body" data-js="raw-body"></div>
     </dialog>
 
     <!-- One shared confirmation dialog for the actions that lose something: unsaved

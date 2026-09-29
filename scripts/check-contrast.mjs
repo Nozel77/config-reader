@@ -78,6 +78,10 @@ const PAIRS = [
   ['accent-text', 'accent-soft', 4.5],
   ['ok-text', 'ok-soft', 4.5], ['warn-text', 'warn-soft', 4.5], ['err-text', 'err-soft', 4.5],
   ['err-text', 'surface', 4.5],
+  // The raw view's tokenizer paints a key in the accent and a number in the ok colour,
+  // both on the code body's --surface. A syntax colour is text like any other, so it
+  // is held to the body floor rather than to the 3.0 a control gets.
+  ['accent-text', 'surface', 4.5], ['ok-text', 'surface', 4.5],
   ['accent', 'surface', 3.0], ['accent', 'bg', 3.0],
   ['border-strong', 'surface', 3.0], ['border-strong', 'bg', 3.0],
   ['scroll-thumb', 'bg', 3.0], ['scroll-thumb', 'surface-2', 3.0],

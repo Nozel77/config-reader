@@ -250,6 +250,98 @@ ok('a rebound Host cannot read the tool list', rebindTools.status === 403, `stat
 const goodHost = await rawGet('/api/settings', { Host: `127.0.0.1:${PORT}` });
 ok('the real page still reads settings', goodHost.status === 200, `status ${goodHost.status}`);
 
+// --- the raw view reads the file, so it is gated and honest the same way ------
+// It hands back the file verbatim — on Claude Code that includes the token — so it
+// takes the same gate as the settings read, and for the same reason.
+// Written here rather than inherited: the raw assertions below are about a known file,
+// and a fixture left behind by an earlier block would make them depend on its order.
+writeFileSync(FILE, JSON.stringify({
+  env: { ANTHROPIC_BASE_URL: 'http://localhost:20128/v1', ANTHROPIC_AUTH_TOKEN: 'sk-live-token', ANTHROPIC_MODEL: 'knr/a' },
+  permissions: { allow: ['Bash(npm run test:*)'] },
+  mcpServers: { demo: { command: 'node' } },
+}, null, 2) + '\n');
+const rawRebind = await rawGet('/api/raw?tool=claude', { Host: 'evil.example.com' });
+ok('a rebound Host cannot read the raw file', rawRebind.status === 403, `status ${rawRebind.status}`);
+ok('the refused raw reply carries no token', !rawRebind.d.includes('sk-'), rawRebind.d.slice(0, 80));
+const rawGood = await rawGet('/api/raw?tool=claude', { Host: `127.0.0.1:${PORT}` });
+ok('the real page reads the raw file', rawGood.status === 200, `status ${rawGood.status}`);
+const rawDoc = JSON.parse(rawGood.d);
+ok('the raw reply names the file it read', rawDoc.files?.[0]?.file === FILE, String(rawDoc.files?.[0]?.file));
+ok('the raw reply carries the file verbatim',
+  rawDoc.files?.[0]?.text === readFileSync(FILE, 'utf8'), String(rawDoc.files?.[0]?.text?.length));
+ok('the raw reply names the format', rawDoc.files?.[0]?.format === 'json', String(rawDoc.files?.[0]?.format));
+ok('an unknown tool is refused, not guessed at',
+  (await rawGet('/api/raw?tool=nope', { Host: `127.0.0.1:${PORT}` })).status === 400);
+
+// --- the raw view writes the file as text, not as a parsed document ----------
+// The one path in this app that hands the server bytes. It has to be gated like the
+// write it is, name its file by basename rather than by path, refuse a document it
+// would leave unparseable, and keep a backup like every other write.
+const rawPost = (payload, headers = {}) => new Promise(resolve => {
+  const data = JSON.stringify(payload);
+  const req = http.request({
+    host: '127.0.0.1', port: PORT, path: '/api/raw', method: 'POST',
+    headers: { Host: `127.0.0.1:${PORT}`, 'content-type': 'application/json',
+      'content-length': Buffer.byteLength(data), ...headers },
+  }, res => { let d = ''; res.on('data', c => { d += c; }); res.on('end', () => resolve({ status: res.statusCode, d })); });
+  req.end(data);
+});
+
+// A rebound Host must not be able to write either — this route overwrites a config.
+const rawWriteRebind = await rawPost({ tool: 'claude', text: '{}' }, { Host: 'evil.example.com' });
+ok('a rebound Host cannot write through the raw route', rawWriteRebind.status === 403, `status ${rawWriteRebind.status}`);
+ok('the refused write left the file alone', readFileSync(FILE, 'utf8').includes('permissions'),
+  readFileSync(FILE, 'utf8').slice(0, 40));
+
+const beforeWrite = JSON.parse((await rawGet('/api/raw?tool=claude', { Host: `127.0.0.1:${PORT}` })).d);
+const goodWrite = await rawPost({
+  tool: 'claude', id: 'settings.json', baseMtimeMs: beforeWrite.files[0].mtimeMs,
+  text: '{\n  "env": {\n    "ANTHROPIC_MODEL": "edited-as-text"\n  },\n  "permissions": {\n    "allow": []\n  }\n}\n',
+});
+ok('a raw write is accepted', goodWrite.status === 200, `${goodWrite.status} ${goodWrite.d.slice(0, 80)}`);
+ok('the text landed on disk verbatim',
+  readFileSync(FILE, 'utf8') === '{\n  "env": {\n    "ANTHROPIC_MODEL": "edited-as-text"\n  },\n  "permissions": {\n    "allow": []\n  }\n}\n',
+  JSON.stringify(readFileSync(FILE, 'utf8').slice(0, 40)));
+ok('a raw write leaves a backup',
+  existsSync(BAK) && readdirSync(BAK).some(f => f.startsWith('settings.json.backup.')),
+  existsSync(BAK) ? readdirSync(BAK).join(',') : 'no backups dir');
+
+// A file this project can parse is parsed before it is written, so a typo cannot leave a
+// config the CLI refuses to start with.
+const badWrite = await rawPost({ tool: 'claude', id: 'settings.json', text: '{\n  "a": 1,\n}\n' });
+ok('a raw write that would not parse is refused', badWrite.status === 400, `status ${badWrite.status}`);
+ok('the refusal names the mistake', /trailing comma/i.test(badWrite.d), badWrite.d.slice(0, 100));
+ok('the refused write did not touch the file', readFileSync(FILE, 'utf8').includes('edited-as-text'));
+
+// The stale-write guard, same contract as the form's save.
+const rawStale = await rawPost({ tool: 'claude', id: 'settings.json', text: '{}\n', baseMtimeMs: 1 });
+ok('a stale raw write is a 409', rawStale.status === 409, `status ${rawStale.status}`);
+ok('the stale refusal carries the current mtime', JSON.parse(rawStale.d).mtimeMs > 1, rawStale.d);
+
+// A file is named by basename, and a name this tool does not own is refused — no path
+// from the client ever reaches the filesystem.
+const noSuch = await rawPost({ tool: 'claude', id: '../../../etc/passwd', text: 'x' });
+ok('a path that is not one of this tool\'s files is refused', noSuch.status === 400, `status ${noSuch.status}`);
+const noText = await rawPost({ tool: 'claude', id: 'settings.json' });
+ok('a write with no text is refused', noText.status === 400, `status ${noText.status}`);
+ok('a write for an unknown tool is refused', (await rawPost({ tool: 'nope', text: '{}' })).status === 400);
+
+// The token line is flagged: the file is shown unmasked by choice, so the dialog has to
+// be able to say that it holds one. It is a line number, never the value.
+const tokenLine = rawDoc.files?.[0]?.secrets || [];
+ok('the token line is flagged as a secret', tokenLine.length >= 1, JSON.stringify(tokenLine));
+const flagText = JSON.stringify(tokenLine);
+ok('the flag is a line number, not the value', !flagText.includes('sk-'), flagText);
+
+// A broken file reports where the parser stopped — the Error tab's whole reason to be.
+writeFileSync(FILE, '{\n  "env": {},\n  "model": "sonnet",\n}\n');
+const broken = JSON.parse((await rawGet('/api/raw?tool=claude', { Host: `127.0.0.1:${PORT}` })).d);
+ok('a broken file reports a parse error', !!broken.files?.[0]?.parseError);
+ok('the parse error names a line', broken.files?.[0]?.parseError?.line === 4,
+  String(broken.files?.[0]?.parseError?.line));
+ok('the parse error names the trailing comma',
+  /trailing comma/i.test(broken.files?.[0]?.parseError?.hint || ''), broken.files?.[0]?.parseError?.hint);
+
 // --- a save with no mtime must not overwrite a file that appeared since ------
 // baseMtimeMs 0 means "there was no file when I loaded". A file created by another
 // writer in the meantime is a conflict, not a free overwrite.

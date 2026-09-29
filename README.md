@@ -8,7 +8,7 @@ Pick a tool, and its config opens beside the picker. Change the connection value
 
 ![CONFIG READER landing page, dark theme](assets/landing-dark.png)
 
-**Quick nav:** [Quick start](#quick-start) · [Features](#features) · [Supported tools](#supported-tools) · [Saved endpoints](#saved-endpoints) · [Any gateway](#point-it-at-any-gateway) · [CLI](#cli) · [API](#api)
+**Quick nav:** [Quick start](#quick-start) · [Features](#features) · [Supported tools](#supported-tools) · [Raw view](#raw-view) · [Saved endpoints](#saved-endpoints) · [Any gateway](#point-it-at-any-gateway) · [CLI](#cli) · [API](#api)
 
 ## Why
 
@@ -40,6 +40,7 @@ On macOS, `node server.js --shortcut` writes a double-clickable `CONFIG READER.c
 - **Full `env` editor for Claude Code** — 10 known fields (connection, models, runtime) grouped as cards, plus an "Other variables" section so unknown keys stay visible and survive round-trips.
 - **Simple mode for 3 more tools** — the same connection values patched into each tool's native format by text surgery; the rest of the file is never rewritten.
 - **Model picker that reads any gateway** — fetches `<base>/v1/models` server-side and lists what the endpoint actually reported. See [Point it at any gateway](#point-it-at-any-gateway).
+- **Raw view and editor** — the whole file, every key, with line numbers and syntax colour. The form owns ten keys; `permissions`, `hooks`, `mcpServers` and the rest are only visible here — and editable here. See [Raw view](#raw-view).
 - **Saved endpoints** — a base URL, auth token and default model kept once and applied to any tool's form. See [Saved endpoints](#saved-endpoints).
 - **Safe saves** — atomic write (tmp + rename), 5 rotating backups, a stale-write guard that returns `409` when the file changed under you, per-file EOL preserved, and no-op saves that skip the backup.
 - **Dark / light theme** — follows the OS, toggle persisted in `localStorage`, painted before CSS so there is no light flash on load.
@@ -57,6 +58,30 @@ On macOS, `node server.js --shortcut` writes a double-clickable `CONFIG READER.c
 All non-Claude tools are pointed at the `9router` provider id, so an existing 9Router install is edited in place instead of duplicated.
 
 ![Model picker, dark theme](assets/model-picker-dark.png)
+
+## Raw view
+
+The form edits ten keys. A `settings.json` in the wild holds permissions, hooks, MCP servers, a status line and whatever else the tool has grown — and "everything else round-trips untouched" is a claim you cannot check without seeing the file.
+
+**Raw** in the rail opens the file as it sits on disk: line numbers, syntax colour, and the copy button.
+
+![Raw view, dark theme](assets/raw-dark.png)
+
+**Raw | Error.** The second tab is the reason the view exists for a broken file: the parser's own sentence, a plain-language hint when the mistake is one this project can name, the line it stopped on, and the code with that line marked.
+
+![Error tab, dark theme](assets/raw-error-dark.png)
+
+**Edit writes the file as text.** The form round-trips a parsed document and lets the server serialise it; Edit hands over the bytes instead, which is what an editor has. Everything the form cannot reach — `permissions`, `hooks`, `mcpServers` — is editable there.
+
+**The two writers do not overlap.** Pressing Edit with unsaved form edits asks first, because the raw save replaces the file the form was built from; after a raw save the form is re-read, so the two views cannot disagree about what is on disk. The same `409` stale-write guard, atomic write and 5 rotating backups apply.
+
+**What is checked before a raw write.** Claude Code and OpenCode files are parsed before they are written, so a typo cannot leave a config the CLI refuses to start with. Codex and Hermes have no parser here by design (see the note under [Development](#development)) — their text is written as handed over, and the editor is the only check it gets.
+
+**The file is shown verbatim.** No masking, by choice: `env.ANTHROPIC_AUTH_TOKEN` appears exactly as it is written. Lines that look like a token are marked in the gutter and counted in a banner above the code, so the dialog says what it is showing you before you screenshot it.
+
+**Two files for Hermes.** Its key lives in `.env`, not in the YAML, so both are shown as tabs — and a save writes every file that changed, so the pair is never half-applied.
+
+**Where the line number comes from.** V8's `JSON.parse` reports a byte offset, not a line; the offset is counted into a line server-side (`lib/raw.js`), which is also why it works on Node 22.13, whose message does not carry `(line N column M)` at all. Codex and Hermes are patched by line-based text surgery and never parsed whole, so their Error tab says so rather than inventing a diagnosis.
 
 ## Saved endpoints
 
@@ -111,7 +136,8 @@ Environment overrides, each following the tool's own rule: `CLAUDE_CONFIG_DIR` f
 - **Emptying a field deletes the key** from `env`. Unknown keys appear under "Other variables" with add support — nothing is silently dropped.
 - **The model picker writes the target you name.** Assign sets whichever variable opened the dialog; a model advertising a ≥1M context window gets the `[1m]` suffix Claude Code expects, and anything else has it stripped.
 - **Non-canonical files are announced.** If re-serialising the file would change it (indentation, key order, spacing), the editor says so before you save — a reformat you agreed to, not one you find in `git diff` later.
-- **Broken files are a supported state.** Invalid JSON shows the raw text and the parse error instead of crashing, and Save is disabled so the broken file is not overwritten. When the mistake is one the parser's own message cannot name — a `//` comment, a trailing comma, curly quotes — the banner says which it is, because all three come back as the same opaque "Expected double-quoted property name".
+- **Broken files are a supported state.** Invalid JSON shows the raw text and the parse error instead of crashing, and Save is disabled so the broken file is not overwritten. When the mistake is one the parser's own message cannot name — a `//` comment, a trailing comma, curly quotes — the banner says which it is, because all three come back as the same opaque "Expected double-quoted property name". The [raw view](#raw-view)'s Error tab shows the same diagnosis against the numbered code, with the offending line marked.
+- **The raw view reads disk, not the form.** It is deliberately not gated on unsaved edits: seeing what is on disk while a draft sits in the form is the point. Editing is gated, because that is the gesture that replaces the file — and a raw save re-reads the form afterwards.
 - **`settings.json` is strict JSON, and this editor matches Claude Code.** A `//` comment or a trailing comma is a syntax error in that file — Claude Code reports it as a Settings Error at the next start — so the editor refuses it too rather than silently rewriting your file into a form you did not write. `opencode.json` is the exception: that one is JSONC in the wild and trailing commas are tolerated.
 - **`model:` block edits are surgical.** Only `default`, `base_url` and (when absent) `provider` are touched. A `context_length`, a `max_tokens`, or an `api_key: ${YOUR_OWN_VAR}` line you wrote by hand survives a save untouched.
 - **Simple-mode secrets stay put.** Hermes keeps its key in `.env`, so the form hands that field back empty on load — empty means "leave the stored key alone", not "erase it".
@@ -132,6 +158,8 @@ All paths are derived server-side. The browser names a **tool**, never a file.
 | `GET` | `/api/tools` | Tool registry |
 | `POST` | `/api/scan` | `{ tool }` → `{ found, file, … }` |
 | `GET` | `/api/settings?tool=` | Full document (`env` mode) or `{ values }` (`simple` mode). Defaults to `claude`. |
+| `GET` | `/api/raw?tool=` | The file verbatim, plus `format`, the 1-based `secrets` lines and a `parseError` when it will not parse. Hermes returns two files. |
+| `POST` | `/api/raw` | `{ tool, id, text, baseMtimeMs }` → `{ ok, bytes, mtimeMs, backup }`. Writes the file as text. `id` is a basename this tool owns — never a path. `400` when the document would not parse (JSON formats only), `409` stale. |
 | `POST` | `/api/settings` | `env`: `{ tool, doc, baseMtimeMs }`. `simple`: `{ tool, values }`. Returns `{ ok, bytes, mtimeMs, backup }`. |
 | `POST` | `/api/models` | `{ baseUrl, apiKey }` (unsaved draft) → `{ url, models, caps }` or `{ error }`. Token used server-side only. |
 | `POST` | `/api/test-model` | `{ baseUrl, apiKey, model }` → `{ ok, ms, error? }`. One tiny completion — a model can be listed and still be down upstream. |
@@ -154,7 +182,8 @@ lib/
   util.js             num / str — the two scalar coercions shared across modules.
   model-caps.js       Context window, vision, tools, pricing from a /v1/models reply.
   secrets.js          DPAPI at rest on Windows; plain elsewhere.
-  connections.js      The saved-endpoint store.
+  raw.js              The raw view's reader: line numbers from a byte offset, and the
+                      lines that look like a token.  connections.js      The saved-endpoint store.
   shortcut.js         Desktop launcher installers for Windows, Linux, macOS — the `.command` is what a Mac double-clicks.
   router.js           All HTTP routes.
   tools/
@@ -172,6 +201,7 @@ app/
   editor.ts           The field cards and the load/save round-trip.
   landing.ts          The tool cards, the scan, open/close.
   models.ts           The model picker.
+  raw.ts              The raw view and its editor: the tokenizer, the dialog, the tabs.
   connections.ts      The saved-endpoints dialog.
   theme.ts            Light/dark.
 index.html            One page: the tool rail and the editor. Loads /app.js as a module.
@@ -207,10 +237,10 @@ Current state of those checks:
 
 | Check | Result |
 |-------|--------|
-| `node server.js --selftest` | 210 passed |
-| `node scripts/check-ui.mjs` | 300 passed |
-| `node scripts/check-save.mjs` | 93 passed |
-| `node scripts/check-contrast.mjs` | 90 contrast pairs pass, 41 tokens all referenced |
+| `node server.js --selftest` | 220 passed |
+| `node scripts/check-ui.mjs` | 380 passed |
+| `node scripts/check-save.mjs` | 118 passed |
+| `node scripts/check-contrast.mjs` | 96 contrast pairs pass, 41 tokens all referenced |
 
 > [!NOTE]
 > `check-contrast.mjs` is a gate, not a report. It reads the tokens out of `styles.css`, checks every foreground/background pair the stylesheet actually paints, verifies the three theme blocks declare the same keys, and fails if a declared token is never referenced.
@@ -224,6 +254,8 @@ Current state of those checks:
 - No file path ever arrives from the client. `toolPaths()` is server-side and unknown tool ids are refused.
 - `http(s)` only for Base URL and the model-list fetch — `file://` and `ftp://` are rejected.
 - File contents and tokens are never logged. Console lines name the file and the byte count, nothing more.
+- `GET /api/raw` returns the file verbatim, so on Claude Code it carries `env.ANTHROPIC_AUTH_TOKEN`. It takes the same `Origin` gate as the settings read — a DNS-rebinding page gets a `403` and no body. The dialog shows the token unmasked by choice, and says so on screen; nothing is ever sent anywhere but your own browser.
+- `POST /api/raw` writes a file, so it is gated the same way. It names one of the tool's own files by basename and refuses anything else, which is what keeps a path from ever arriving from the browser.
 - The endpoint store is the one file holding secrets this project creates. Its token never rides a list reply; it is handed out per row on Apply. On Windows it is DPAPI-encrypted to your account; elsewhere it is plain text in a `600` file.
 
 ## Contributing

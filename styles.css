@@ -865,7 +865,7 @@ code { font-family: var(--font-mono); }
 /* A native <dialog>: top layer, focus trap, Escape and backdrop come from the browser.
    display/overlay are discrete, so allow-discrete defers them to the transition's end.
    The confirm dialog shares the shell and overrides its own width below. */
-.model-picker, .connections, .confirm {
+.model-picker, .connections, .confirm, .raw {
   width: min(52rem, 92vw);
   max-width: none;
   max-height: min(86dvh, 48rem);
@@ -883,7 +883,7 @@ code { font-family: var(--font-mono); }
   transition: opacity 180ms ease, scale 240ms var(--spring), translate 240ms var(--spring),
     display 240ms allow-discrete, overlay 240ms allow-discrete;
 }
-.model-picker[open], .connections[open], .confirm[open] {
+.model-picker[open], .connections[open], .confirm[open], .raw[open] {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -891,16 +891,16 @@ code { font-family: var(--font-mono); }
   scale: 1;
   translate: 0 0;
 }
-@starting-style { .model-picker[open], .connections[open], .confirm[open] { opacity: 0; scale: 0.97; translate: 0 0.6rem; } }
-.model-picker::backdrop, .connections::backdrop, .confirm::backdrop {
+@starting-style { .model-picker[open], .connections[open], .confirm[open], .raw[open] { opacity: 0; scale: 0.97; translate: 0 0.6rem; } }
+.model-picker::backdrop, .connections::backdrop, .confirm::backdrop, .raw::backdrop {
   background: rgb(15 23 42 / 0);
   transition: background-color 240ms ease, display 240ms allow-discrete, overlay 240ms allow-discrete;
 }
-.model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop { background: rgb(15 23 42 / 0.55); }
-@starting-style { .model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop { background: rgb(15 23 42 / 0); } }
+.model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop, .raw[open]::backdrop { background: rgb(15 23 42 / 0.55); }
+@starting-style { .model-picker[open]::backdrop, .connections[open]::backdrop, .confirm[open]::backdrop, .raw[open]::backdrop { background: rgb(15 23 42 / 0); } }
 
 /* The page behind is inert, but a wheel over the backdrop still scrolls it. */
-body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[open]) { overflow: hidden; }
+body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[open]), body:has(.raw[open]) { overflow: hidden; }
 
 .model-picker__head { display: flex; align-items: flex-start; gap: 0.75rem; }
 .model-picker__title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
@@ -1028,6 +1028,144 @@ body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[o
 .connections__foot .button--primary { margin-left: auto; }
 .connections__count:empty { display: none; }
 .connections__note { overflow-wrap: anywhere; }
+
+/* --------------------------------------------------------------- raw view */
+
+/* The code body sits on --surface, not --surface-2: at 4.43:1 and 4.06:1 the ok and
+   warn tokens fall under the 4.5 floor on the second plane in light mode, and a syntax
+   colour is text like any other. On --surface every token clears it in both themes, so
+   the tokenizer needs no palette of its own. */
+.raw { width: min(58rem, 94vw); overflow: hidden; }
+.raw__head { display: flex; align-items: flex-start; gap: 0.5rem; }
+/* The title block yields width first, so the controls never wrap onto a second row. */
+.raw__headline { flex: 1 1 auto; min-width: 0; }
+.raw__dot { margin-top: 0.45rem; }
+.raw__title { font-family: var(--font-mono); font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
+.raw__sub {
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The editor: monospace, no colouring, sized to fill the dialog the way the read-only
+   code box does. `resize: none` because the dialog already owns the size.
+   Unlike the code box, a textarea has no intrinsic content height — it would collapse to
+   its min-height and show three lines — so this one needs a real floor under it. */
+.raw__edit {
+  flex: 1 1 auto;
+  min-height: min(52dvh, 26rem);
+  padding: 0.6rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  resize: none;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+.raw__edit:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.raw__body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.6rem; min-height: 0; }
+
+.raw__tabs { display: flex; gap: 0.3rem; }
+.raw__tab {
+  padding: 0.3rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-2);
+  background: transparent;
+  border: 1.5px solid var(--border);
+  border-radius: var(--ctl-r);
+  cursor: pointer;
+}
+.raw__tab--on { color: var(--accent-text); background: var(--accent-soft); border-color: var(--accent); }
+
+.raw__bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.raw__segs { display: inline-flex; border: 1.5px solid var(--border); border-radius: var(--ctl-r); overflow: hidden; }
+.raw__seg {
+  padding: 0.25rem 0.8rem;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.raw__seg--on { color: var(--accent-btn-text); background: var(--accent-btn); }
+.raw__meta { margin-left: auto; }
+
+.raw__secret { margin: 0; }
+.raw__error { display: flex; flex-direction: column; gap: 0.5rem; }
+.raw__error-at { margin: 0; }
+
+/* The scroller: one box, both axes, so a long line and a long file are the same
+   gesture. The line numbers ride along in the gutter — `position: sticky` on a left
+   column is what keeps them there without a second scroll container to synchronise. */
+.raw__code-body {
+  flex: 1 1 auto;
+  /* No min-height here. The dialog's own max-height is the ceiling, and a floor under
+     it wins the flex negotiation — a 40-line file pushed the last rows straight out of
+     the dialog with no way to scroll to them. The height comes from the content up to
+     the shell's limit, and the scroll starts there. */
+  min-height: 6rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.6rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  tab-size: 4;
+}
+
+/* Every row carries the rule, transparent when unmarked, so marking a line never
+   shifts its text sideways. A border rather than an inset box-shadow: the gutter is
+   sticky at left:0 and would paint straight over a shadow. */
+.raw__line { display: flex; min-width: max-content; border-left: 3px solid transparent; }
+/* The line the parser stopped on, and a line that looks like a token. Two colours, so
+   they are never confused, and the err one wins where both apply. */
+.raw__line--mark { border-left-color: var(--err); }
+.raw__line--secret { border-left-color: var(--warn); }
+.raw__line--mark.raw__line--secret { border-left-color: var(--err); }
+
+.raw__no {
+  flex: 0 0 3.4rem;
+  position: sticky;
+  left: 0;
+  padding: 0 0.7rem 0 0.6rem;
+  text-align: right;
+  color: var(--text-3);
+  background: var(--surface);
+  border-right: 1.5px solid var(--border);
+  user-select: none;
+}
+/* The gutter is what carries the fill, and only the gutter: its text and background
+   are a pair check-contrast already holds to 4.5. Tinting the whole row would put the
+   syntax colours on a soft fill nobody has measured. */
+.raw__line--mark .raw__no { color: var(--err-text); background: var(--err-soft); }
+.raw__line--secret .raw__no { color: var(--warn-text); background: var(--warn-soft); }
+.raw__line--mark.raw__line--secret .raw__no { color: var(--err-text); background: var(--err-soft); }
+.raw__code { padding-left: 0.7rem; white-space: pre; }
+
+/* Four syntax colours, all existing tokens, all verified at 4.5:1 on --surface in both
+   themes: a key is the accent, a string the plain text colour, a number the ok colour,
+   a comment the muted one. Punctuation and whitespace stay uncoloured. */
+.tok--key { color: var(--accent-text); }
+.tok--str { color: var(--text); }
+.tok--num { color: var(--ok-text); }
+.tok--bool { color: var(--accent-text); font-weight: 600; }
+.tok--comment { color: var(--text-3); font-style: italic; }
+.tok--section { color: var(--accent-text); font-weight: 600; }
+.tok--word { color: var(--text-2); }
+.tok--punct { color: var(--text-2); }
 
 .check {
   display: inline-flex;
@@ -1370,7 +1508,7 @@ body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[o
   .app:not(.app--editor) .rail__action-label { display: none; }
   .provider-group__rows { grid-template-columns: 1fr; }
   /* The picker becomes the screen: a long list wants the whole window. */
-  .model-picker, .connections {
+  .model-picker, .connections, .raw {
     inset: 0;
     /* Not `width: auto`: with inset 0 the used width came out as the content's
        min-content width (476px on a 390px screen), so the dialog hung off the
@@ -1398,6 +1536,11 @@ body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[o
      takes the leftover height and scrolls inside it — otherwise the last row hides
      under the footer with no way to reach it. */
   .connections { height: 100dvh; overflow: hidden; }
+  /* Same reasoning for the raw view: the dialog is the screen, so the code box takes
+     the leftover height and scrolls inside it rather than running under the edge. */
+  .raw { height: 100dvh; overflow: hidden; }
+  .raw__code-body { min-height: 0; }
+  .raw__meta { margin-left: 0; }
   .connections__list { flex: 1 1 auto; min-height: 0; max-height: none; }
   /* Two rows, not one: four controls on a phone push Save off the edge. */
   .connections__foot { display: grid; grid-template-columns: 1fr 1fr; }
@@ -1431,7 +1574,7 @@ body:has(.model-picker[open]), body:has(.connections[open]), body:has(.confirm[o
 /* All of it is decoration on a state change that already happened. */
 @media (prefers-reduced-motion: reduce) {
   .rail, .actionbar, .tool-card, .tool-card__icon, .button, .field-card, .to-top,
-  .model-row, .model-picker, .connections, .rail__action, .model-row__test, .hint, .hint::after {
+  .model-row, .model-picker, .connections, .raw, .rail__action, .model-row__test, .hint, .hint::after {
     transition: none;
   }
   .app--editor .main, .field-card, .other-vars, .tool-card, .rail__brand, .rail__lede,

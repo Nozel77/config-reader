@@ -38,6 +38,8 @@ export const ICONS: Record<string, string> = {
   wrench: '<path d="M10.6 2.4a3.6 3.6 0 0 1-4.4 4.6l-3.2 3.2a1.6 1.6 0 1 0 2.2 2.2l3.2-3.2a3.6 3.6 0 0 1 4.6-4.4L11 6.4l1.4 1.4 1.6-2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
   brain: '<path d="M6.5 2.5a2.5 2.5 0 0 0-2.5 2.5 2.2 2.2 0 0 0-1 4 2.4 2.4 0 0 0 1.6 3.6 2.4 2.4 0 0 0 4.4-1V4a1.5 1.5 0 0 0-2.5-1.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 4.6a2 2 0 0 1 2.4 1.9 2.2 2.2 0 0 1 .7 4.2 2.2 2.2 0 0 1-3.1 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
   dot: '<circle cx="8" cy="8" r="2.6" fill="currentColor"/>',
+  // Two sheets behind one another: the raw view's copy gesture.
+  copy: '<rect x="5.5" y="5.5" width="8.5" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H3.5A1.5 1.5 0 0 0 2 4.5V10a1.5 1.5 0 0 0 1.5 1.5h2" fill="none" stroke="currentColor" stroke-width="1.4"/>',
   // Thinking, as the three facts a gateway reports separately. A toggle switch for
   // "this can be turned off", level sliders for "the effort is settable".
   toggle: '<rect x="1.6" y="5" width="12.8" height="6" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5.2" cy="8" r="1.9" fill="currentColor"/>',

@@ -14,6 +14,7 @@ import {
 import { load, save, otherRow, refreshCard } from './app/editor.js';
 import { renderTools, toolFromUrl, openTool, closeEditor } from './app/landing.js';
 import { closePicker, renderModels, loadModels } from './app/models.js';
+import { openRaw, closeRaw, copyRaw, editRaw, cancelRaw, saveRaw, rawDirty } from './app/raw.js';
 import {
   openConnections, closeConnections, captureFromForm, saveConnections,
   renderConnections, connInput,
@@ -83,6 +84,27 @@ $('other-vars-new').addEventListener('keydown', (e: Event) => {
 });
 
 $('model-picker-reload').addEventListener('click', () => { void loadModels(true); });
+
+// The raw view reads the file straight off disk, so it is deliberately not gated on
+// unsaved edits: seeing what is on disk while a draft sits in the form is the point.
+// It does ask before it starts editing, because that is the gesture that drops the form.
+$('raw-open').addEventListener('click', openRaw);
+$('raw-copy').addEventListener('click', copyRaw);
+$('raw-edit').addEventListener('click', () => { void editRaw(); });
+$('raw-cancel').addEventListener('click', () => { void cancelRaw(); });
+$('raw-save').addEventListener('click', () => { void saveRaw(); });
+// Closing with a draft asks first — an edited file is worth more than a click.
+async function closeRawUnlessDirty(): Promise<void> {
+  if (rawDirty() && !(await confirmDialog({
+    title: 'Discard the edits?',
+    message: 'The changes in this editor are dropped. The file on disk is untouched.',
+    confirmLabel: 'Discard edits',
+  }))) return;
+  closeRaw();
+}
+$('raw-close').addEventListener('click', () => { void closeRawUnlessDirty(); });
+$('raw').addEventListener('cancel', (e: Event) => { e.preventDefault(); void closeRawUnlessDirty(); });
+$('raw').addEventListener('click', outsideClick('raw', () => { void closeRawUnlessDirty(); }));
 
 $('model-picker-close').addEventListener('click', closePicker);
 
@@ -164,6 +186,8 @@ initTheme();
 $('model-picker-close').append(icon('xmark'));
 $('model-picker-reload').append(icon('refresh'));
 $('connections-close').append(icon('xmark'));
+$('raw-close').append(icon('xmark'));
+$('raw-copy').append(icon('copy'));
 $('to-top').append(icon('arrowUp'));
 $('stop-server').prepend(icon('power'));
 $('connections-open').addEventListener('click', openConnections);

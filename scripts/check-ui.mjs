@@ -279,6 +279,25 @@ let connGets = 0;      // how many times the dialog read the store
 let revealed = null;
 // Per-case overrides for the claude GET reply, so a banner path can be exercised.
 let claudeOverride = {};
+// The raw view's reply. A broken Claude file by default: the Error tab is the reason
+// the dialog exists, and a fixture that always parses would never exercise it.
+let rawReply = {
+  tool: 'claude', file: FILE, eol: '\n',
+  files: [{
+    id: 'settings.json', file: FILE, format: 'json', exists: true,
+    text: '{\n  "env": {\n    "ANTHROPIC_AUTH_TOKEN": "sk-live",\n    "A": "b"\n  },\n  // my notes\n  "model": "sonnet"\n}',
+    secrets: [3],
+    parseError: { message: 'Expected double-quoted property name in JSON at position 62', hint: 'This line is a comment.', line: 6, position: 62 },
+  }],
+};
+let rawGets = 0;
+// The write side of the raw view. `rawPostReply` overrides the reply so a refused save
+// can be exercised; `null` means the normal ok reply.
+let rawPosted = [];
+let rawPostReply = null;
+// How many times the form has been read. A raw save must re-read it, so that the two
+// views cannot end up disagreeing about what is on disk.
+let settingsGets = 0;
 let modelReply = {
   url: 'http://localhost:20128/v1/models',
   models: ['knr/b-model', 'knr/a-model', 'knr/a-model:free', 'ag/opus-4'],
@@ -356,12 +375,21 @@ globalThis.fetch = async (url, opts = {}) => {
   } else if (r.includes('/api/connections')) {
     if (opts.method === 'POST') { connPosted.push(JSON.parse(opts.body || '{}')); body = { ok: true, count: connPosted.at(-1).profiles.length }; }
     else { connGets++; body = connReply; }
+  } else if (r.includes('/api/raw')) {
+    if (opts.method === 'POST') {
+      rawPosted.push(JSON.parse(opts.body || '{}'));
+      body = rawPostReply ? rawPostReply.body : { ok: true, file: FILE, bytes: 12, mtimeMs: 2, backup: null };
+    } else {
+      rawGets++;
+      body = rawReply;
+    }
   } else if (r.includes('/api/settings')) {
     const tool = toolOf(r);
     if (opts.method === 'POST') {
       posted.push(JSON.parse(opts.body));
       body = { ok: true, file: tool === 'claude' ? FILE : SIMPLE[tool].file, bytes: 10, mtimeMs: 2, backup: null };
     } else if (tool === 'claude') {
+      settingsGets++;
       body = { selected: FILE, tool, file: FILE, exists: true, raw: '', parsed: fixture, eol: '\n', mtimeMs: 1, normalized: false, parseError: null, ...claudeOverride };
     } else {
       body = { selected: SIMPLE[tool].file, tool, file: SIMPLE[tool].file, values: SIMPLE[tool].values,
@@ -370,15 +398,16 @@ globalThis.fetch = async (url, opts = {}) => {
   } else {
     body = {};
   }
-  // modelReply may carry status/ok so an error path can be exercised.
-  const status = (r.includes('/api/models') && modelReply.status) || 200;
+  // modelReply and rawPostReply may carry a status so an error path can be exercised.
+  const status = (r.includes('/api/models') && modelReply.status)
+    || (r.includes('/api/raw') && opts.method === 'POST' && rawPostReply?.status) || 200;
   return { ok: (r.includes('/api/models') && modelReply.ok !== undefined) ? modelReply.ok : status === 200,
     status, json: async () => body };
 };
 
 // --- run the real script ----------------------------------------------------
 const patched = js.replace(/^renderTools\(\);$/m,
-  'globalThis.__api = { doc: () => doc, values: () => values, tool: () => tool, env, setEnv, FIELDS, KNOWN, prettyPath, setPlatform: p => { platform = p; }, setHome: h => { home = h; }, opened: () => opened };\nrenderTools();');
+  'globalThis.__api = { doc: () => doc, values: () => values, tool: () => tool, env, setEnv, FIELDS, KNOWN, prettyPath, tokenize, linesOf, setPlatform: p => { platform = p; }, setHome: h => { home = h; }, opened: () => opened };\nrenderTools();');
 if (!patched.includes('__api')) throw new Error('could not hook the script — did the last line of app.ts change?');
 new Function(patched)();
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r)); };
@@ -1414,6 +1443,260 @@ await settle();
 ok('captured rows are posted like any other', connPosted.at(-1)?.profiles.length === before + 2,
   JSON.stringify(connPosted.at(-1)?.profiles?.length ?? null));
 ok('a captured token travels to the server', connPosted.at(-1)?.profiles[last]?.apiKey === 'sk-from-the-form');
+
+// ---------------------------------------------------------------- raw view
+// The dialog that shows the file as it sits on disk. Two things are load-bearing: the
+// text is rendered verbatim (the promise the editor makes is that everything else
+// round-trips), and the Error tab names the line the parser stopped on.
+
+ok('the rail offers the raw view', !!hook('raw-open'));
+ok('the raw button is a rail action, not an actionbar one',
+  (hook('raw-open').className || '').includes('rail__action'), hook('raw-open').className);
+ok('the raw dialog starts closed', hook('raw').open !== true);
+ok('nothing is read before it is opened', rawGets === 0, `${rawGets} reads`);
+
+hook('raw-open').fire('click');
+await settle();
+ok('opening reads /api/raw once', rawGets === 1, `${rawGets} reads`);
+ok('the dialog opened', hook('raw').open === true);
+ok('the title is the file name', hook('raw-title').textContent === 'settings.json', hook('raw-title').textContent);
+ok('the subtitle is the shortened path', hook('raw-sub').textContent === '~\\.claude\\settings.json', hook('raw-sub').textContent);
+// The full path stays in the tooltip, the way the actionbar does it.
+ok('the full path is the subtitle\'s tooltip', hook('raw-sub').title === FILE, hook('raw-sub').title);
+
+// The line gutter and the code, line for line. The fixture has 9 lines of text but the
+// trailing one after the last newline is not a line, so 8 rows.
+const rows = () => hook('raw-body').querySelectorAll('.raw__line');
+ok('a row per line of the file', rows().length === 8, String(rows().length));
+ok('the gutter is numbered from 1', rows()[0].querySelector('.raw__no')?.textContent === '1',
+  rows()[0].querySelector('.raw__no')?.textContent);
+
+// The whole point: a key the form has no field for is visible here.
+const bodyText = rows().map(r => r.querySelector('.raw__code')?.textContent || '').join('\n');
+ok('the raw text carries every key, not just the form\'s', /ANTHROPIC_AUTH_TOKEN/.test(bodyText), bodyText.slice(0, 40));
+
+// The tokenizer's classes reach the DOM. The key line is line 3 of the fixture.
+const keyLine = rows()[2];
+ok('a JSON key is painted as a key', keyLine.querySelectorAll('.tok--key').length >= 1,
+  String(keyLine.querySelectorAll('.tok--key').length));
+ok('the token line is flagged as a secret', keyLine.className.includes('raw__line--secret'), keyLine.className);
+// A line with no secret must not be flagged, or the mark stops meaning anything.
+ok('a harmless line is not flagged', !rows()[1].className.includes('raw__line--secret'), rows()[1].className);
+
+// The no-masking choice owes the reader a warning, and it has to say how many lines.
+ok('the dialog warns that the file holds a token', /token/.test(hook('raw-body').textContent), '');
+
+// The Error tab: the parser's sentence, the hint, and the line it stopped on.
+const segs = () => hook('raw-body').querySelectorAll('.raw__seg');
+ok('there is a Raw/Error toggle', segs().length === 2, String(segs().length));
+ok('Raw is the tab it opens on', segs()[0].className.includes('raw__seg--on'));
+hook('raw-body').querySelectorAll('.raw__seg')[1].click();
+await settle();
+ok('the Error tab shows the parser\'s own words',
+  /Expected double-quoted property name/.test(hook('raw-body').textContent));
+ok('the Error tab shows the plain-language hint', /This line is a comment/.test(hook('raw-body').textContent));
+ok('the Error tab names the line', /line 6/.test(hook('raw-body').textContent));
+// The marked line is line 6 of the fixture, and it is marked in the code, not only in
+// the prose above it.
+const marked = hook('raw-body').querySelectorAll('.raw__line--mark');
+ok('the offending line is marked in the code', marked.length === 1, String(marked.length));
+ok('the marked line is the one the parser named',
+  marked[0]?.querySelector('.raw__no')?.textContent === '6', marked[0]?.querySelector('.raw__no')?.textContent);
+
+// Switching back to Raw drops the error view and returns the plain code.
+hook('raw-body').querySelectorAll('.raw__seg')[0].click();
+await settle();
+ok('switching back to Raw drops the diagnostic', !/Expected double-quoted/.test(hook('raw-body').textContent));
+
+// A file that parses has nothing to report, and the dialog must say so rather than
+// invent a diagnosis.
+rawReply = { tool: 'claude', file: FILE, eol: '\n', files: [{ id: 'settings.json', file: FILE, format: 'json',
+  exists: true, text: '{\n  "a": 1\n}', secrets: [], parseError: null }] };
+hook('raw-open').fire('click');
+await settle();
+ok('reopening reads the file again', rawGets === 2, `${rawGets} reads`);
+// Raw is where it opens, so the clean-file sentence lives behind the Error tab.
+hook('raw-body').querySelectorAll('.raw__seg')[1].click();
+await settle();
+ok('a clean file says so', /parses clean/.test(hook('raw-body').textContent), hook('raw-body').textContent.slice(0, 30));
+hook('raw-body').querySelectorAll('.raw__seg')[0].click();
+await settle();
+ok('a clean file is not marked', hook('raw-body').querySelectorAll('.raw__line--mark').length === 0);
+
+// A missing file is its own state, not an empty box.
+rawReply = { tool: 'claude', file: FILE, eol: '\n', files: [{ id: 'settings.json', file: FILE, format: 'json',
+  exists: false, text: '', secrets: [], parseError: null }] };
+hook('raw-open').fire('click');
+await settle();
+ok('a missing file says it is not there', /does not exist yet/.test(hook('raw-body').textContent));
+
+// Hermes is edited through two files, so it gets a tab each.
+rawReply = { tool: 'hermes', file: 'config.yaml', eol: '\n', files: [
+  { id: 'config.yaml', file: 'C:\\h\\config.yaml', format: 'yaml', exists: true,
+    text: 'model:\n  base_url: "http://h/v1"', secrets: [], parseError: null },
+  { id: '.env', file: 'C:\\h\\.env', format: 'dotenv', exists: true,
+    text: 'OPENAI_API_KEY=sk-hermes', secrets: [1], parseError: null },
+] };
+hook('raw-open').fire('click');
+await settle();
+ok('two files draw two tabs', hook('raw-body').querySelectorAll('.raw__tab').length === 2,
+  String(hook('raw-body').querySelectorAll('.raw__tab').length));
+ok('the first tab is the YAML', hook('raw-body').querySelectorAll('.raw__tab')[0].textContent === 'config.yaml');
+hook('raw-body').querySelectorAll('.raw__tab')[1].click();
+await settle();
+ok('the second tab shows the .env', /OPENAI_API_KEY/.test(hook('raw-body').textContent), '');
+ok('the title follows the tab', hook('raw-title').textContent === '.env', hook('raw-title').textContent);
+ok('the .env key line is flagged', hook('raw-body').querySelectorAll('.raw__line--secret').length === 1);
+// A YAML URL must not turn its own scheme into a comment — the case the tokenizer's
+// key rule exists for.
+hook('raw-body').querySelectorAll('.raw__tab')[0].click();
+await settle();
+ok('a YAML URL is not painted as a comment',
+  hook('raw-body').querySelectorAll('.tok--comment').length === 0,
+  String(hook('raw-body').querySelectorAll('.tok--comment').length));
+ok('a YAML key is painted as a key', hook('raw-body').querySelectorAll('.tok--key').length >= 1);
+
+hook('raw-close').fire('click');
+await settle();
+ok('the close button closes the dialog', hook('raw').open !== true);
+rawReply = { tool: 'claude', file: FILE, eol: '\n', files: [{ id: 'settings.json', file: FILE, format: 'json',
+  exists: true, text: '{\n  "a": 1\n}', secrets: [], parseError: null }] };
+
+// ---------------------------------------------------------------- editing
+// The dialog writes the file as text, which is the one path in this app that does not
+// go through the parsed document. Two things are load-bearing: the textarea holds the
+// file's own bytes, and what it posts is that text, not a re-serialised object.
+hook('raw-open').fire('click');
+await settle();
+ok('the view mode offers Edit', hook('raw-edit').hidden !== true);
+ok('the view mode does not offer Save', hook('raw-save').hidden === true);
+ok('the view mode does not offer Cancel', hook('raw-cancel').hidden === true);
+ok('the edit dot is not shown while viewing', hook('raw-dot').hidden === true);
+
+hook('raw-edit').fire('click');
+await settle();
+ok('Edit swaps in the textarea', hook('raw-body').querySelectorAll('.raw__edit').length === 1,
+  String(hook('raw-body').querySelectorAll('.raw__edit').length));
+const box = hook('raw-body').querySelector('.raw__edit');
+ok('the textarea holds the file verbatim', box.value === '{\n  "a": 1\n}', JSON.stringify(box.value));
+ok('editing hides the Raw/Error toggle', hook('raw-body').querySelectorAll('.raw__seg').length === 0);
+ok('editing offers Save', hook('raw-save').hidden !== true);
+ok('editing offers Cancel', hook('raw-cancel').hidden !== true);
+ok('editing hides Copy', hook('raw-copy').hidden === true);
+ok('Save starts disabled — nothing has changed yet', hook('raw-save').disabled === true);
+ok('the edit dot appears while editing', hook('raw-dot').hidden !== true);
+
+// A keystroke marks the draft dirty and arms Save.
+box.value = '{\n  "a": 2\n}';
+box.fire('input');
+await settle();
+ok('typing arms Save', hook('raw-save').disabled === false);
+ok('typing marks the draft', hook('raw-dot').className.includes('actionbar__dot--dirty'), hook('raw-dot').className);
+
+hook('raw-save').fire('click');
+await settle();
+const rawPost = rawPosted.at(-1);
+ok('Save posts to /api/raw', !!rawPost, JSON.stringify(rawPosted.length));
+ok('the post names the tool', rawPost?.tool === 'claude', String(rawPost?.tool));
+ok('the post names the file by basename', rawPost?.id === 'settings.json', String(rawPost?.id));
+ok('the post carries the edited TEXT, not a document',
+  rawPost?.text === '{\n  "a": 2\n}', JSON.stringify(rawPost?.text));
+ok('the post carries the mtime it loaded at', typeof rawPost?.baseMtimeMs === 'number',
+  String(rawPost?.baseMtimeMs));
+// The form is re-read after a raw save: the two views must not disagree about disk.
+ok('a raw save reloads the form', settingsGets > 0, `${settingsGets} reads`);
+ok('the dialog leaves edit mode after a save', hook('raw-body').querySelectorAll('.raw__edit').length === 0);
+
+// Cancel discards without posting.
+const postsBeforeCancel = rawPosted.length;
+hook('raw-edit').fire('click');
+await settle();
+const box2 = hook('raw-body').querySelector('.raw__edit');
+box2.value = '{\n  "a": 3\n}';
+box2.fire('input');
+hook('raw-cancel').fire('click');
+await settle();
+ok('Cancel posts nothing', rawPosted.length === postsBeforeCancel, `${rawPosted.length} posts`);
+ok('Cancel returns to the view', hook('raw-body').querySelectorAll('.raw__edit').length === 0);
+
+// A failed save keeps the draft and says so, rather than silently losing the edit.
+rawPostReply = { status: 400, body: { error: 'not saved — the file would not parse: a trailing comma' } };
+hook('raw-edit').fire('click');
+await settle();
+const box3 = hook('raw-body').querySelector('.raw__edit');
+box3.value = '{ broken';
+box3.fire('input');
+hook('raw-save').fire('click');
+await settle();
+ok('a refused save keeps the textarea', hook('raw-body').querySelectorAll('.raw__edit').length === 1);
+ok('a refused save leaves Save armed', hook('raw-save').disabled === false);
+rawPostReply = null;
+
+// Closing with unsaved edits asks first.
+hook('raw-cancel').fire('click');
+await settle();
+hook('raw-edit').fire('click');
+await settle();
+confirmAuto = false;
+const box4 = hook('raw-body').querySelector('.raw__edit');
+box4.value = '{\n  "a": 9\n}';
+box4.fire('input');
+hook('raw-close').fire('click');
+await settle();
+ok('closing with a draft asks first', hook('confirm').open === true);
+hook('confirm-cancel').fire('click');
+await settle();
+ok('a refused close leaves the dialog open', hook('raw').open === true);
+hook('raw-close').fire('click');
+await settle();
+hook('confirm-ok').fire('click');
+await settle();
+ok('a confirmed close lets the draft go', hook('raw').open !== true);
+confirmAuto = true;
+rawReply = { tool: 'claude', file: FILE, eol: '\n', files: [{ id: 'settings.json', file: FILE, format: 'json',
+  exists: true, text: '{\n  "a": 1\n}', secrets: [], parseError: null }] };
+
+// ------------------------------------------------------------ the tokenizer
+// Pure, so it is tested on its own rather than only through the DOM. The rule that
+// matters most: the four formats all write a URL, and a URL contains `//`, which must
+// not be read as a comment — and `http:`, which must not be read as a key.
+const tk = (line) => api.tokenize(line).map(t => `${t.cls}:${t.text}`);
+
+// Round-tripping is the load-bearing property: the file is shown verbatim, so a
+// tokenizer that drops a character would make the dialog lie about the file.
+const RT = ['{"a":1}', '  "k": "v",', 'key = "value"', '[section]', '  nested: 1.5e10',
+  '# comment', '// comment', 'OPENAI_API_KEY=abc', '    base_url: "http://h/v1"',
+  '  "esc": "a\\"b"', '', '  - list item', 'a: [1, 2, 3]', '  "q": \'single\'',
+  'Authorization = "Bearer sk-x"', '  "n": -1.5e-3,'];
+const lossy = RT.filter(l => api.tokenize(l).map(t => t.text).join('') !== l);
+ok('the tokenizer loses no character on any shape', lossy.length === 0, lossy.join(' | '));
+
+// The URL case, which is the one the design hinged on.
+ok('a YAML URL is not a comment', !api.tokenize('    base_url: "http://localhost:20128/v1"').some(t => t.cls === 'comment'));
+ok('a JSON URL is not a comment', !api.tokenize('  "u": "http://h/v1",').some(t => t.cls === 'comment'));
+ok('a # inside a string is not a comment', !api.tokenize('  "u": "https://h/a#b"').some(t => t.cls === 'comment'));
+ok('a URL scheme is not read as a key',
+  !api.tokenize('    base_url: "http://localhost:20128/v1"').some(t => t.cls === 'key' && t.text === 'http'));
+
+// Keys, one per format.
+ok('a JSON key is a key', api.tokenize('  "A_B": "v",').some(t => t.cls === 'key' && t.text === '"A_B"'));
+ok('a YAML key is a key', api.tokenize('  base_url: "v"').some(t => t.cls === 'key' && t.text === 'base_url'));
+ok('a TOML key is a key', api.tokenize('Authorization = "v"').some(t => t.cls === 'key' && t.text === 'Authorization'));
+ok('a dotenv key is a key', api.tokenize('OPENAI_API_KEY=abc').some(t => t.cls === 'key' && t.text === 'OPENAI_API_KEY'));
+ok('a TOML section is one token',
+  api.tokenize('[model_providers.x]')[0]?.cls === 'section', JSON.stringify(tk('[model_providers.x]')));
+ok('a number is a number', api.tokenize('  "n": 3000000,').some(t => t.cls === 'num' && t.text === '3000000'));
+ok('a boolean is a boolean', api.tokenize('  "b": true').some(t => t.cls === 'bool' && t.text === 'true'));
+// A string that merely contains a colon is a value, not a key — the JSON rule is
+// "a string with ONLY a colon after it".
+ok('a value containing a colon is not a key',
+  api.tokenize('  "u": "a:b",').filter(t => t.cls === 'key').length === 1,
+  JSON.stringify(tk('  "u": "a:b",')));
+
+// The line count the note and the gutter share: a trailing newline is not a line.
+ok('a trailing newline is not a line', api.linesOf('a\nb\n').length === 2, String(api.linesOf('a\nb\n').length));
+ok('an empty file is no lines', api.linesOf('').length === 1, String(api.linesOf('').length));
+ok('a file with no trailing newline counts right', api.linesOf('a\nb').length === 2);
 
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? `  (${r.detail})` : ''}`);
 const failed = results.filter(r => !r.pass).length;

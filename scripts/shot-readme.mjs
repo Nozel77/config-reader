@@ -9,7 +9,8 @@
 import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // The README frame. 1280x720 is the HD default; deviceScaleFactor 1 keeps the file
 // small enough for a repo and the text crisp at 100%.
@@ -40,9 +41,11 @@ if (!CHROME) {
   process.exit(1);
 }
 const URL_BASE = process.argv[2] || 'http://127.0.0.1:8787';
+// The CDP port, not the editor's: this script talks to a browser, not to a server.
 const PORT = Number(process.env.CDP_PORT || 9335);
 const OUT = process.env.OUT || join(process.cwd(), 'assets');
 mkdirSync(OUT, { recursive: true });
+const HERE = dirname(fileURLToPath(import.meta.url));
 const profile = mkdtempSync(join(tmpdir(), 'cdp-'));
 
 const chrome = spawn(CHROME, [
@@ -187,6 +190,85 @@ await sleep(500);
 await shot('connections-dark.png', { dark: true });
 console.log('connections rows:', await evaluate(`document.querySelectorAll('[data-js="connections-list"] .conn').length`));
 console.log('connections note:', await evaluate(`document.querySelector('[data-js="connections-note"]').textContent`));
+await evaluate(`document.querySelector('[data-js="connections-close"]').click()`);
+await sleep(400);
+
+// --- raw view: the whole file, with a key the form has no field for -----------
+// This is the one frame that cannot come from the live file: the dialog shows the
+// document verbatim, so a real settings.json would put a real token in the README.
+//
+// So it gets a server of its own, pointed at a scratch config dir by CLAUDE_CONFIG_DIR.
+// Staging it inside the main page would mean overwriting ~/.claude/settings.json and
+// putting it back afterwards, and a crash in between would leave the user's real file
+// replaced by a demo one. A second server costs one spawn and cannot touch it at all.
+// The document is broken on purpose: the Error tab is half of what the dialog is for,
+// and a clean file would only ever show the other half.
+const rawDir = mkdtempSync(join(tmpdir(), 'raw-shot-'));
+const rawPort = PORT + 1;
+writeFileSync(join(rawDir, 'settings.json'), [
+  '{',
+  '  "env": {',
+  '    "ANTHROPIC_BASE_URL": "http://localhost:20128/v1",',
+  '    "ANTHROPIC_AUTH_TOKEN": "sk-demo-for-the-shot",',
+  '    "ANTHROPIC_MODEL": "kenari/deepseek-v4-1-flash",',
+  '    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kenari/qwen-2.5-7b",',
+  '    "API_TIMEOUT_MS": "3000000",',
+  '    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "498000"',
+  '  },',
+  '  "permissions": {',
+  '    "allow": ["Bash(npm run test:*)", "Read(//src/**)"],',
+  '    "deny": ["Bash(curl:*)"]',
+  '  },',
+  '  "hooks": {',
+  '    "PostToolUse": [{ "matcher": "Edit", "hooks": [{ "type": "command", "command": "npm run lint" }] }]',
+  '  },',
+  '  "mcpServers": {',
+  '    "demo": { "command": "node", "args": ["server.js"] }',
+  '  },',
+  '  "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" },',
+  '  // a note I left myself, which is exactly why this file will not parse',
+  '  "model": "sonnet",',
+  '}',
+  '',
+].join('\n'));
+const rawSrv = spawn(process.execPath, [join(HERE, '..', 'server.js'), '--port', String(rawPort)], {
+  env: { ...process.env, CLAUDE_CONFIG_DIR: rawDir, HOME: rawDir, USERPROFILE: rawDir },
+  stdio: 'ignore',
+});
+const stopRawSrv = () => { try { rawSrv.kill(); } catch { /* already gone */ } };
+try {
+  for (let i = 0; i < 60; i++) {
+    try { const r = await fetch(`http://127.0.0.1:${rawPort}/api/tools`); if (r.ok) break; } catch { /* still booting */ }
+    await sleep(250);
+  }
+  await cmd('Page.navigate', { url: `http://127.0.0.1:${rawPort}/` });
+  await sleep(1400);
+  await evaluate(`document.querySelectorAll('[data-js="tool-picker"] .tool-card')[0].click()`);
+  for (let i = 0; i < 40; i++) {
+    if (await evaluate(`!document.querySelector('[data-js="editor"]').hidden`)) break;
+    await sleep(250);
+  }
+  await sleep(400);
+  await evaluate(`document.querySelector('[data-js="raw-open"]').click()`);
+  for (let i = 0; i < 40; i++) {
+    if (await evaluate(`document.querySelectorAll('[data-js="raw-body"] .raw__line').length > 0`)) break;
+    await sleep(250);
+  }
+  await sleep(500);
+  await shot('raw-dark.png', { dark: true });
+  console.log('raw rows:', await evaluate(`document.querySelectorAll('[data-js="raw-body"] .raw__line').length`));
+  console.log('raw meta:', await evaluate(`document.querySelector('[data-js="raw-body"] .raw__meta').textContent`));
+
+  // The Error tab: the hint, the parser's own words, and the marked line.
+  await evaluate(`document.querySelectorAll('[data-js="raw-body"] .raw__seg')[1].click()`);
+  await sleep(500);
+  await shot('raw-error-dark.png', { dark: true });
+  console.log('error marked lines:', await evaluate(`document.querySelectorAll('[data-js="raw-body"] .raw__line--mark').length`));
+} finally {
+  stopRawSrv();
+  try { rmSync(rawDir, { recursive: true, force: true }); } catch { /* already gone */ }
+}
+
 restoreConnections();
 
 console.log('page errors:', await evaluate(`JSON.stringify(window.__errs || [])`));
