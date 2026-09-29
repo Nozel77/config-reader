@@ -13,6 +13,7 @@ catalog.json
 
 # Dev screenshots (scripts/shot.mjs output; not referenced by README)
 scripts/shots/
+tools/shots/
 
 # Secrets — never commit tokens
 .env
